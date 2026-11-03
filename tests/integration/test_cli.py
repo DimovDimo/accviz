@@ -106,4 +106,4 @@ def test_version_flag_and_module_entry_point():
         [sys.executable, "-m", "accviz", "--version"], capture_output=True, text=True, env=env, timeout=120
     )
     assert result.returncode == 0
-    assert "accviz 1.0.0" in result.stdout
+    assert "accviz 1.1.0" in result.stdout

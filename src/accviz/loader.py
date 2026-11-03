@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
@@ -20,6 +20,7 @@ class Dataset:
     journal: pd.DataFrame
     invoices: pd.DataFrame
     budget: pd.DataFrame
+    supplier_invoices: pd.DataFrame = field(default_factory=lambda: empty_supplier_invoices())
 
     @property
     def start_date(self) -> pd.Timestamp:
@@ -63,6 +64,32 @@ def _optional(df: pd.DataFrame, col: str, default: str = "") -> pd.Series:
     return pd.Series(default, index=df.index, dtype=object)
 
 
+SUPPLIER_INVOICE_COLUMNS = [
+    "invoice_id",
+    "supplier",
+    "issue_date",
+    "due_date",
+    "amount",
+    "paid_date",
+    "paid_amount",
+]
+
+
+def empty_supplier_invoices() -> pd.DataFrame:
+    """Normalised, empty supplier-invoice table (used when the optional file is absent)."""
+    return pd.DataFrame(
+        {
+            "invoice_id": pd.Series(dtype=object),
+            "supplier": pd.Series(dtype=object),
+            "issue_date": pd.Series(dtype="datetime64[ns]"),
+            "due_date": pd.Series(dtype="datetime64[ns]"),
+            "amount": pd.Series(dtype=float),
+            "paid_date": pd.Series(dtype="datetime64[ns]"),
+            "paid_amount": pd.Series(dtype=float),
+        }
+    )
+
+
 # ------------------------------------------------------------------- normalisation
 def normalize_coa(raw: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(
@@ -86,8 +113,15 @@ def normalize_journal(raw: pd.DataFrame) -> pd.DataFrame:
             "credit": _amount(raw["credit"]),
             "department": _optional(raw, "department"),
             "reference": _optional(raw, "reference"),
+            "source": _source(raw),
         }
     )
+
+
+def _source(raw: pd.DataFrame) -> pd.Series:
+    """Entry origin in lower case; a missing or empty value means ``system`` (v1.0 files)."""
+    text = _optional(raw, "source").str.lower()
+    return text.where(text != "", "system")
 
 
 def normalize_invoices(raw: pd.DataFrame) -> pd.DataFrame:
@@ -97,6 +131,22 @@ def normalize_invoices(raw: pd.DataFrame) -> pd.DataFrame:
         {
             "invoice_id": _text(raw["invoice_id"]),
             "customer": _text(raw["customer"]),
+            "issue_date": _date(raw["issue_date"]),
+            "due_date": _date(raw["due_date"]),
+            "amount": _amount(raw["amount"]),
+            "paid_date": paid_date,
+            "paid_amount": paid_amount.fillna(0.0).astype(float),
+        }
+    )
+
+
+def normalize_supplier_invoices(raw: pd.DataFrame) -> pd.DataFrame:
+    paid_amount = _amount(raw["paid_amount"]) if "paid_amount" in raw.columns else pd.Series(0.0, index=raw.index)
+    paid_date = _date(raw["paid_date"]) if "paid_date" in raw.columns else pd.Series(pd.NaT, index=raw.index)
+    return pd.DataFrame(
+        {
+            "invoice_id": _text(raw["invoice_id"]),
+            "supplier": _text(raw["supplier"]),
             "issue_date": _date(raw["issue_date"]),
             "due_date": _date(raw["due_date"]),
             "amount": _amount(raw["amount"]),
@@ -118,7 +168,10 @@ def normalize_budget(raw: pd.DataFrame) -> pd.DataFrame:
 
 # ------------------------------------------------------------------------ public API
 def load_raw_directory(directory: str | Path) -> dict[str, pd.DataFrame]:
-    """Read the four CSV files from *directory* as raw text tables."""
+    """Read the CSV files from *directory* as raw text tables.
+
+    The four required files must exist. Optional files are read only when present.
+    """
     base = Path(directory)
     raw: dict[str, pd.DataFrame] = {}
     for key, filename in config.DATASET_FILES.items():
@@ -126,6 +179,10 @@ def load_raw_directory(directory: str | Path) -> dict[str, pd.DataFrame]:
         if not path.is_file():
             raise FileNotFoundError(f"Required file not found: {path}")
         raw[key] = pd.read_csv(path, dtype=str, keep_default_na=False)
+    for key, filename in config.OPTIONAL_FILES.items():
+        path = base / filename
+        if path.is_file():
+            raw[key] = pd.read_csv(path, dtype=str, keep_default_na=False)
     return raw
 
 
@@ -139,11 +196,17 @@ def prepare_dataset(raw: Mapping[str, pd.DataFrame]) -> tuple[Dataset | None, Va
     if not pre.ok:
         return None, pre
 
+    supplier = (
+        normalize_supplier_invoices(raw["supplier_invoices"])
+        if "supplier_invoices" in raw
+        else empty_supplier_invoices()
+    )
     ds = Dataset(
         chart_of_accounts=normalize_coa(raw["coa"]),
         journal=normalize_journal(raw["journal"]),
         invoices=normalize_invoices(raw["invoices"]),
         budget=normalize_budget(raw["budget"]),
+        supplier_invoices=supplier,
     )
     result = validate_dataset(ds)
     result.warnings = pre.warnings + result.warnings

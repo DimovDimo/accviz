@@ -1,15 +1,28 @@
 """Deterministic generator of synthetic, double-entry-consistent accounting data.
 
 The generated company ("Northwind Trading Ltd.", fictional) sells goods and services,
-buys stock on credit, pays salaries, rent, utilities, marketing, interest and a 10 %
-corporate income tax paid quarterly. Every journal entry is balanced by construction,
-and the receivables sub-ledger is consistent with the AR control account.
+buys stock on credit from suppliers, pays salaries, rent, utilities, marketing, interest
+and a 10 % corporate income tax paid quarterly. Every journal entry is balanced by
+construction, and both sub-ledgers (receivables and supplier invoices) agree with their
+control accounts.
+
+Version 1.1 adds:
+
+* ``supplier_invoices.csv`` – 3–6 supplier invoices per month replace the monthly
+  purchase lump; each invoice is paid after 20–70 days with probability 0.97.
+* a ``source`` column on journal lines: ``manual`` for depreciation, interest, tax accrual,
+  loan principal and opening balances; ``system`` otherwise. Manual postings are made on
+  business days.
+* ``anomalies=True`` injects nine known audit anomalies and writes their ground truth
+  (see :func:`_inject_anomalies`). The injected duplicate postings are not supplier
+  invoices, so the AP sub-ledger differs from the GL by exactly their amounts.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -61,6 +74,17 @@ CUSTOMERS: list[str] = [
     "Tidewater Imports",
 ]
 
+SUPPLIERS: list[str] = [
+    "Alpine Components",
+    "Balkan Wholesale",
+    "Cobalt Logistics Supplies",
+    "Danube Packaging",
+    "Evergreen Goods",
+    "Falcon Electronics",
+    "Gorge Office Supply",
+    "Harbor Materials",
+]
+
 # Calendar-month demand factor (retail-like seasonality, peak in November/December).
 MONTH_SEASONALITY: dict[int, float] = {
     1: 0.92, 2: 0.90, 3: 1.00, 4: 1.02, 5: 1.05, 6: 1.06,
@@ -69,9 +93,30 @@ MONTH_SEASONALITY: dict[int, float] = {
 
 CSV_COLUMNS: dict[str, list[str]] = {
     "coa": ["account_code", "account_name", "account_type", "subtype"],
-    "journal": ["entry_id", "date", "account_code", "description", "debit", "credit", "department", "reference"],
+    "journal": [
+        "entry_id",
+        "date",
+        "account_code",
+        "description",
+        "debit",
+        "credit",
+        "department",
+        "reference",
+        "source",
+    ],
     "invoices": ["invoice_id", "customer", "issue_date", "due_date", "amount", "paid_date", "paid_amount"],
     "budget": ["period", "account_code", "budget_amount"],
+    "supplier_invoices": ["invoice_id", "supplier", "issue_date", "due_date", "amount", "paid_date", "paid_amount"],
+    "ground_truth": ["entry_id", "anomaly_type", "description"],
+}
+
+# Injected anomalies (per GeneratorConfig.anomalies): type -> count.
+ANOMALY_COUNTS: dict[str, int] = {
+    "round_amount": 2,
+    "weekend_manual": 2,
+    "threshold_manual": 2,
+    "outlier_expense": 1,
+    "duplicate_posting": 2,
 }
 
 
@@ -100,8 +145,11 @@ class GeneratorConfig:
     payment_probability: float = 0.97
     invoices_min: int = 40
     invoices_max: int = 60
+    supplier_invoices_min: int = 3
+    supplier_invoices_max: int = 6
     budget_noise: float = 0.04
     product_share: float = 0.65
+    anomalies: bool = False
 
     def __post_init__(self) -> None:
         if self.months < 1:
@@ -110,6 +158,8 @@ class GeneratorConfig:
             raise ValueError("payment_probability must be in (0, 1]")
         if self.invoices_min < 1 or self.invoices_max < self.invoices_min:
             raise ValueError("invalid invoice count range")
+        if self.supplier_invoices_min < 1 or self.supplier_invoices_max < self.supplier_invoices_min:
+            raise ValueError("invalid supplier invoice count range")
 
 
 class _Ledger:
@@ -117,6 +167,7 @@ class _Ledger:
 
     def __init__(self) -> None:
         self.entries: list[dict] = []
+        self.tagged: list[tuple[str, str, str]] = []  # (anomaly type, entry index, description)
 
     def post(
         self,
@@ -124,6 +175,8 @@ class _Ledger:
         description: str,
         lines: list[tuple[str, float, float, str]],
         reference: str = "",
+        source: str = "system",
+        tag: Optional[str] = None,
     ) -> None:
         # Round every line to cents first, so both sides are summed from the values stored.
         lines = [(account, round(float(dr), 2), round(float(cr), 2), dept) for account, dr, cr, dept in lines]
@@ -132,13 +185,23 @@ class _Ledger:
         assert abs(debit - credit) < 0.005, f"unbalanced entry: {description}"
         if debit == 0:  # e.g. no tax in a loss-making month: nothing to post
             return
-        self.entries.append({"date": date, "description": description, "lines": lines, "reference": reference})
+        entry = {
+            "date": date,
+            "description": description,
+            "lines": lines,
+            "reference": reference,
+            "source": source,
+            "tag": tag,
+        }
+        self.entries.append(entry)
 
     def to_frame(self) -> pd.DataFrame:
         rows = []
         ordered = sorted(self.entries, key=lambda e: e["date"])  # stable: keeps posting order per day
         for number, entry in enumerate(ordered, start=1):
             entry_id = f"JE-{number:06d}"
+            if entry["tag"]:
+                self.tagged.append((entry["tag"], entry_id, entry["description"]))
             for account, debit, credit, dept in entry["lines"]:
                 rows.append(
                     {
@@ -150,6 +213,7 @@ class _Ledger:
                         "credit": round(float(credit), 2),
                         "department": dept,
                         "reference": entry["reference"],
+                        "source": entry["source"],
                     }
                 )
         return pd.DataFrame(rows, columns=CSV_COLUMNS["journal"])
@@ -161,8 +225,78 @@ def _day(month_start: pd.Timestamp, day: int) -> pd.Timestamp:
     return month_start + pd.Timedelta(days=min(day, last) - 1)
 
 
+def _business_day(day: pd.Timestamp) -> pd.Timestamp:
+    """Move a weekend date back to the preceding Friday (manual postings are made on working days)."""
+    while day.weekday() >= 5:
+        day = day - pd.Timedelta(days=1)
+    return day
+
+
+def _nth_weekday(month_start: pd.Timestamp, weekday: int, n: int) -> pd.Timestamp:
+    """The n-th (1-based) occurrence of *weekday* (0 = Monday) in the month."""
+    offset = (weekday - month_start.weekday()) % 7
+    return month_start + pd.Timedelta(days=offset + 7 * (n - 1))
+
+
+def _inject_anomalies(ledger: _Ledger, start: pd.Timestamp, supplier_rows: list[dict]) -> None:
+    """Post nine known anomalies on top of the normal ledger.
+
+    * 2 round amounts (system entries of exactly 12,000 and 5,000 on expense accounts)
+    * 2 manual entries on a Saturday and a Sunday (amounts 850.40 and 620.00)
+    * 2 manual entries just below the 5,000 approval threshold (4,870.00 and 4,960.50)
+    * 1 expense outlier (9,137.25 on Utilities; the normal level is about 1,800)
+    * 2 duplicate postings: copies of supplier-invoice postings two days after the original,
+      with no supplier invoice record (so the AP sub-ledger does not include them)
+    """
+
+    def month(index: int) -> pd.Timestamp:
+        return start + pd.DateOffset(months=index)
+
+    def expense(account: str, amount: float, cash: str, dept: str) -> list[tuple[str, float, float, str]]:
+        return [(account, amount, 0.0, dept), (cash, 0.0, amount, dept)]
+
+    ledger.post(_day(month(4), 12), "Marketing agency retainer", expense("6300", 12_000.0, "1000", "Marketing"),
+                "ANOM-R1", tag="round_amount")  # fmt: skip
+    ledger.post(_day(month(15), 18), "Office equipment consumables", expense("6400", 5_000.0, "1000", "Administration"),
+                "ANOM-R2", tag="round_amount")  # fmt: skip
+
+    saturday = _nth_weekday(month(7), 5, 2)
+    sunday = _nth_weekday(month(19), 6, 3)
+    ledger.post(saturday, "Manual adjustment - office supplies", expense("6400", 850.40, "1000", "Administration"),
+                "ANOM-W1", source="manual", tag="weekend_manual")  # fmt: skip
+    ledger.post(sunday, "Manual adjustment - marketing materials", expense("6300", 620.00, "1000", "Marketing"),
+                "ANOM-W2", source="manual", tag="weekend_manual")  # fmt: skip
+
+    ledger.post(_business_day(_day(month(9), 10)), "Manual payment - equipment service",
+                expense("6400", 4_870.00, "1000", "Administration"), "ANOM-T1", source="manual",
+                tag="threshold_manual")  # fmt: skip
+    ledger.post(_business_day(_day(month(21), 11)), "Manual payment - software licence",
+                expense("6400", 4_960.50, "1000", "Administration"), "ANOM-T2", source="manual",
+                tag="threshold_manual")  # fmt: skip
+
+    ledger.post(_day(month(12), 9), "Utility invoice (estimate)", expense("6200", 9_137.25, "1000", "Operations"),
+                "ANOM-O1", tag="outlier_expense")  # fmt: skip
+
+    for index in (6, 17):
+        key = month(index).strftime("%Y-%m")
+        original = next(row for row in supplier_rows if row["issue_date"].startswith(key))
+        amount = float(original["amount"])
+        posted = pd.Timestamp(original["issue_date"]) + pd.Timedelta(days=2)
+        ledger.post(
+            posted,
+            f"Supplier invoice {original['invoice_id']} - {original['supplier']}",
+            [("5000", amount, 0.0, "Operations"), ("2000", 0.0, amount, "Operations")],
+            original["invoice_id"],
+            tag="duplicate_posting",
+        )
+
+
 def generate_dataset(config_: GeneratorConfig | None = None) -> dict[str, pd.DataFrame]:
-    """Generate the four raw tables (CSV-ready, dates as ISO strings)."""
+    """Generate the raw tables (CSV-ready, dates as ISO strings).
+
+    Keys: ``coa``, ``journal``, ``invoices``, ``budget``, ``supplier_invoices``, and
+    ``anomaly_ground_truth`` when ``anomalies`` is enabled.
+    """
     cfg = config_ or GeneratorConfig()
     rng = np.random.default_rng(cfg.seed)
     start = pd.Timestamp(cfg.start).replace(day=1)
@@ -170,10 +304,10 @@ def generate_dataset(config_: GeneratorConfig | None = None) -> dict[str, pd.Dat
 
     ledger = _Ledger()
     invoices: list[dict] = []
+    supplier_rows: list[dict] = []
     budget_rows: list[dict] = []
     tax_accrued: dict[str, float] = {}
     loan_balance = round(cfg.opening_loan, 2)
-    purchases_prev = 0.0
 
     # Opening balances, posted the day before the first month. Share capital is the
     # balancing figure: assets (cash + equipment) minus the opening loan.
@@ -191,6 +325,7 @@ def generate_dataset(config_: GeneratorConfig | None = None) -> dict[str, pd.Dat
             ("2500", 0.0, opening_loan, "Finance"),
         ],
         "OPENING",
+        source="manual",
     )
 
     for i in range(cfg.months):
@@ -254,22 +389,47 @@ def generate_dataset(config_: GeneratorConfig | None = None) -> dict[str, pd.Dat
                 )
             month_revenue += amount
 
-        # ---- cost of sales and supplier payments ----------------------------------
+        # ---- cost of sales: supplier invoices (AP sub-ledger) ----------------------
         purchases = round(month_revenue * cfg.cogs_ratio * rng.normal(1.0, 0.03), 2)
-        ledger.post(
-            _day(ms, 14),
-            f"Stock purchases {period}",
-            [("5000", purchases, 0.0, "Operations"), ("2000", 0.0, purchases, "Operations")],
-            period,
-        )
-        if purchases_prev > 0:
-            ledger.post(
-                _day(ms, 5),
-                f"Supplier payments for {(ms - pd.DateOffset(months=1)).strftime('%Y-%m')}",
-                [("2000", purchases_prev, 0.0, "Finance"), ("1000", 0.0, purchases_prev, "Finance")],
-                period,
+        n_suppliers = int(rng.integers(cfg.supplier_invoices_min, cfg.supplier_invoices_max + 1))
+        split = rng.gamma(2.0, 1.0, size=n_suppliers)
+        parts = np.round(purchases * split / split.sum(), 2)
+        parts[-1] = round(purchases - float(parts[:-1].sum()), 2)  # cents go to the last invoice
+        for amount in parts:
+            amount = float(amount)
+            issue = ms + pd.Timedelta(days=int(rng.integers(0, days_in_month)))
+            terms = int(rng.choice([30, 45, 60]))
+            supplier = SUPPLIERS[int(rng.integers(len(SUPPLIERS)))]
+            sup_id = f"SUP-{len(supplier_rows) + 1:06d}"
+            paid_date = None
+            if rng.random() < cfg.payment_probability:
+                candidate = issue + pd.Timedelta(days=int(rng.integers(20, 71)))
+                if candidate <= end:
+                    paid_date = candidate
+            supplier_rows.append(
+                {
+                    "invoice_id": sup_id,
+                    "supplier": supplier,
+                    "issue_date": issue.strftime("%Y-%m-%d"),
+                    "due_date": (issue + pd.Timedelta(days=terms)).strftime("%Y-%m-%d"),
+                    "amount": round(amount, 2),
+                    "paid_date": paid_date.strftime("%Y-%m-%d") if paid_date is not None else "",
+                    "paid_amount": round(amount, 2) if paid_date is not None else 0.0,
+                }
             )
-        purchases_prev = purchases
+            ledger.post(
+                issue,
+                f"Supplier invoice {sup_id} - {supplier}",
+                [("5000", amount, 0.0, "Operations"), ("2000", 0.0, amount, "Operations")],
+                sup_id,
+            )
+            if paid_date is not None:
+                ledger.post(
+                    paid_date,
+                    f"Payment to supplier {sup_id}",
+                    [("2000", amount, 0.0, "Finance"), ("1000", 0.0, amount, "Finance")],
+                    sup_id,
+                )
 
         # ---- operating expenses ----------------------------------------------------
         salaries = round(cfg.base_salaries * (1.01**i) * rng.normal(1.0, 0.01), 2)
@@ -299,16 +459,21 @@ def generate_dataset(config_: GeneratorConfig | None = None) -> dict[str, pd.Dat
         ledger.post(_day(ms, 25), f"Office supplies {period}",
                     [("6400", supplies, 0.0, "Administration"), ("1000", 0.0, supplies, "Administration")])  # fmt: skip
         month_end = _day(ms, days_in_month)
+        manual_day = _business_day(month_end)
         ledger.post(month_end, f"Salaries and wages {period}",
                     [("6000", salaries, 0.0, "Administration"), ("1000", 0.0, salaries, "Administration")])  # fmt: skip
-        ledger.post(month_end, f"Depreciation {period}",
-                    [("6500", depreciation, 0.0, "Operations"), ("1590", 0.0, depreciation, "Operations")])  # fmt: skip
-        ledger.post(month_end, f"Loan interest {period}",
-                    [("7000", interest, 0.0, "Finance"), ("1000", 0.0, interest, "Finance")])  # fmt: skip
-        ledger.post(month_end, f"Loan principal repayment {period}",
-                    [("2500", principal, 0.0, "Finance"), ("1000", 0.0, principal, "Finance")])  # fmt: skip
-        ledger.post(month_end, f"Income tax accrual {period}",
-                    [("8000", tax, 0.0, "Finance"), ("2100", 0.0, tax, "Finance")])  # fmt: skip
+        ledger.post(manual_day, f"Depreciation {period}",
+                    [("6500", depreciation, 0.0, "Operations"), ("1590", 0.0, depreciation, "Operations")],
+                    source="manual")  # fmt: skip
+        ledger.post(manual_day, f"Loan interest {period}",
+                    [("7000", interest, 0.0, "Finance"), ("1000", 0.0, interest, "Finance")],
+                    source="manual")  # fmt: skip
+        ledger.post(manual_day, f"Loan principal repayment {period}",
+                    [("2500", principal, 0.0, "Finance"), ("1000", 0.0, principal, "Finance")],
+                    source="manual")  # fmt: skip
+        ledger.post(manual_day, f"Income tax accrual {period}",
+                    [("8000", tax, 0.0, "Finance"), ("2100", 0.0, tax, "Finance")],
+                    source="manual")  # fmt: skip
         tax_accrued[period] = tax
         loan_balance -= principal
 
@@ -344,24 +509,39 @@ def generate_dataset(config_: GeneratorConfig | None = None) -> dict[str, pd.Dat
             noisy = value * rng.normal(1.0, cfg.budget_noise)
             budget_rows.append({"period": period, "account_code": account, "budget_amount": round(noisy, 2)})
 
+    if cfg.anomalies:
+        _inject_anomalies(ledger, start, supplier_rows)
+
     journal = ledger.to_frame()
     coa = pd.DataFrame(DEFAULT_CHART_OF_ACCOUNTS, columns=CSV_COLUMNS["coa"])
-    return {
+    raw: dict[str, pd.DataFrame] = {
         "coa": coa,
         "journal": journal,
         "invoices": pd.DataFrame(invoices, columns=CSV_COLUMNS["invoices"]),
         "budget": pd.DataFrame(budget_rows, columns=CSV_COLUMNS["budget"]),
+        "supplier_invoices": pd.DataFrame(supplier_rows, columns=CSV_COLUMNS["supplier_invoices"]),
     }
+    if cfg.anomalies:
+        truth = [
+            {"entry_id": entry_id, "anomaly_type": tag, "description": description}
+            for tag, entry_id, description in ledger.tagged
+        ]
+        raw[config.GROUND_TRUTH_KEY] = pd.DataFrame(truth, columns=CSV_COLUMNS["ground_truth"])
+    return raw
 
 
 def write_dataset(raw: dict[str, pd.DataFrame], directory: str | Path) -> dict[str, Path]:
-    """Write the four tables as CSV files and return their paths."""
+    """Write every table in *raw* as a CSV file and return the paths by key."""
     base = Path(directory)
     base.mkdir(parents=True, exist_ok=True)
+    filenames = {
+        **config.DATASET_FILES,
+        **config.OPTIONAL_FILES,
+        config.GROUND_TRUTH_KEY: config.ANOMALY_GROUND_TRUTH_FILE,
+    }
     paths: dict[str, Path] = {}
-    for key, filename in config.DATASET_FILES.items():
-        path = base / filename
-        raw[key].to_csv(path, index=False)
+    for key, table in raw.items():
+        path = base / filenames[key]
+        table.to_csv(path, index=False)
         paths[key] = path
     return paths
-

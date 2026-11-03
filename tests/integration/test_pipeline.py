@@ -7,7 +7,7 @@ import pytest
 
 from accviz import config
 from accviz.analysis import analyze
-from accviz.ledger import balances_as_of, trial_balance, is_trial_balance_balanced
+from accviz.ledger import balances_as_of, is_trial_balance_balanced, trial_balance
 from accviz.loader import read_dataset
 from accviz.receivables import aging_schedule
 from accviz.report import render_report, write_report
@@ -77,7 +77,7 @@ def test_report_is_self_contained_html(tmp_path, pipeline_dataset):
     html = out.read_text(encoding="utf-8")
     assert html.startswith("<!DOCTYPE html>")
     assert "Key figures" in html and "Receivables aging" in html and "Balance sheet" in html
-    assert html.count('class="plotly-graph-div"') == 8  # one per chart
+    assert html.count('class="plotly-graph-div"') == 13  # one per chart section
     assert "Balanced" in html
     assert '<script src="https://cdn.plot.ly' not in html  # Plotly JS is embedded, no network needed
 

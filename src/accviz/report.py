@@ -11,8 +11,9 @@ from pathlib import Path
 import pandas as pd
 import plotly.graph_objects as go
 
-from accviz import charts, config
+from accviz import charts, config, departments
 from accviz.analysis import AnalysisResult, analyze
+from accviz.cashflow import SECTION_LABELS
 from accviz.loader import Dataset
 
 KPI_LABELS: dict[str, str] = {
@@ -44,7 +45,8 @@ def format_value(key: str, value: float | None) -> str:
     if value is None or pd.isna(value):
         return "–"
     if key in PERCENT_KEYS:
-        return f"{value * 100:,.1f} %"
+        # round first and add 0.0 so that a value of -0.0 is shown as 0.0 %, not -0.0 %
+        return f"{round(value * 100, 1) + 0.0:,.1f} %"
     if key == "current_ratio" or key == "debt_to_equity":
         return f"{value:,.2f}"
     return format_money(value)
@@ -68,16 +70,22 @@ def _figure_html(fig: go.Figure, include_js: bool) -> str:
 
 
 def _chart_sections(result: AnalysisResult) -> list[tuple[str, go.Figure]]:
-    return [
+    sections = [
         ("Revenue, expenses and net income", charts.revenue_expense_trend(result.income_monthly)),
         ("Margins", charts.margin_trend(result.income_monthly)),
         ("Income statement waterfall", charts.income_waterfall(result.income_totals)),
         ("Expense structure", charts.expense_donut(result.expenses)),
+        ("Cash flow by activity", charts.cash_flow_bars(result.cash_flow_monthly)),
         ("Cash", charts.cash_line(result.cash)),
         ("Receivables aging", charts.aging_bars(result.aging_summary)),
+        ("Payables aging", charts.aging_bars(result.ap_summary)),
         ("Budget variance", charts.budget_variance_bars(result.budget_summary)),
+        ("Revenue forecast", charts.forecast_chart(result.forecast.table if result.forecast else pd.DataFrame())),
+        ("Expenses by cost centre", charts.department_bars(departments.department_pivot(result.departments_monthly))),
+        ("Audit findings by rule", charts.audit_bars(result.audit.summary if result.audit else pd.DataFrame())),
         ("Balance sheet composition", charts.balance_sheet_composition(result.balance_sheet)),
     ]
+    return sections
 
 
 _CSS = """
@@ -102,6 +110,89 @@ table.data th { background: #f0f4fa; }
 .status-bad { color: #c62828; font-weight: 600; }
 footer { text-align: center; color: #7b8794; font-size: 13px; padding: 16px; }
 """
+
+
+def _cash_flow_html(result: AnalysisResult) -> str:
+    cf = result.cash_flow
+    if cf is None:
+        return "<p>No cash flow data.</p>"
+    summary = pd.DataFrame(
+        {
+            "Item": [
+                "Opening cash",
+                SECTION_LABELS["operating"],
+                SECTION_LABELS["investing"],
+                SECTION_LABELS["financing"],
+                "Net change in cash",
+                "Closing cash",
+                "GL closing cash",
+            ],
+            "Amount": [
+                cf.opening_cash,
+                cf.operating,
+                cf.investing,
+                cf.financing,
+                cf.net_change,
+                cf.closing_cash,
+                cf.gl_closing_cash,
+            ],
+        }
+    )
+    status = "reconciled to the general ledger" if cf.is_reconciled() else f"difference {cf.difference:,.2f}"
+    monthly = result.cash_flow_monthly
+    money = [c for c in monthly.columns if c != "period"]
+    return (
+        f"<p>Cash flow {status}.</p>"
+        + _table(summary, ["Amount"])
+        + "<h3>Monthly</h3>"
+        + _table(monthly, money)
+    )
+
+
+def _payables_html(result: AnalysisResult) -> str:
+    summary = _table(result.ap_summary[["bucket", "invoice_count", "outstanding"]], ["outstanding"])
+    recon = _table(result.reconciliation_table.drop(columns=["status"], errors="ignore"),
+                   ["gl_balance", "subledger_balance", "difference"]) if not result.reconciliation_table.empty else ""  # fmt: skip
+    suppliers = _table(result.top_suppliers, ["outstanding"]) if not result.top_suppliers.empty else "<p>No open supplier invoices.</p>"  # fmt: skip
+    return f"<h3>Aging</h3>{summary}<h3>Reconciliation to the general ledger</h3>{recon}<h3>Largest open balances</h3>{suppliers}"  # fmt: skip
+
+
+def _forecast_html(result: AnalysisResult) -> str:
+    if result.forecast is None:
+        return f"<p>{html.escape(result.forecast_error or 'Forecast not available.')}</p>"
+    fut = result.forecast.future.rename(columns={"value": "forecast", "lower": "lower 95 %", "upper": "upper 95 %"})
+    mape = f"{result.forecast_mape * 100:.1f} %" if result.forecast_mape is not None else "–"
+    model = "trend × seasonal index" if result.forecast.seasonal else "linear trend (fewer than 24 months)"
+    return (
+        f"<p>Model: {html.escape(model)}. Backtest MAPE on a 6-month holdout: {mape}.</p>"
+        + _table(fut[["period", "forecast", "lower 95 %", "upper 95 %"]], ["forecast", "lower 95 %", "upper 95 %"])
+    )
+
+
+def _departments_html(result: AnalysisResult) -> str:
+    if result.departments_summary.empty:
+        return "<p>No expenses in the selected period.</p>"
+    return _table(result.departments_summary, ["amount"])
+
+
+def _audit_html(result: AnalysisResult) -> str:
+    audit = result.audit
+    if audit is None:
+        return "<p>No audit results.</p>"
+    b = audit.benford
+    benford = (
+        f"Benford first-digit test on {b.count:,} amounts: chi-square {b.chi_square:,.1f} "
+        f"(critical value {b.critical_value}), MAD {b.mad:.4f} – {b.conformity}. "
+        "Benford results are indicators, not proof of error."
+    )
+    summary = _table(audit.summary[["label", "severity", "findings", "entries"]])
+    findings = audit.findings.head(25)
+    shown = _table(findings[["date", "entry_id", "rule", "account_code", "amount", "detail"]], ["amount"])
+    more = f"<p>Showing 25 of {len(audit.findings)} findings.</p>" if len(audit.findings) > 25 else ""
+    return (
+        f"<p>{html.escape(benford)}</p>{summary}"
+        f"<h3>Findings</h3>{shown}{more}"
+    )
 
 
 def render_report(dataset: Dataset, start=None, end=None) -> str:
@@ -146,6 +237,11 @@ def render_report(dataset: Dataset, start=None, end=None) -> str:
         }
     )
     bs_html = _table(bs_rows, ["Amount"])
+    cash_html = _cash_flow_html(result)
+    payables_html = _payables_html(result)
+    forecast_html = _forecast_html(result)
+    departments_html = _departments_html(result)
+    audit_html = _audit_html(result)
 
     chart_html = []
     for index, (title, fig) in enumerate(_chart_sections(result)):
@@ -181,6 +277,10 @@ def render_report(dataset: Dataset, start=None, end=None) -> str:
   {income_html}
 </section>
 <section>
+  <h2>Cash flow statement (direct method)</h2>
+  {cash_html}
+</section>
+<section>
   <h2>Balance sheet summary</h2>
   {bs_html}
 </section>
@@ -189,8 +289,24 @@ def render_report(dataset: Dataset, start=None, end=None) -> str:
   {aging_html}
 </section>
 <section>
+  <h2>Payables aging and reconciliation</h2>
+  {payables_html}
+</section>
+<section>
   <h2>Budget versus actual (by account)</h2>
   {budget_html}
+</section>
+<section>
+  <h2>Revenue forecast</h2>
+  {forecast_html}
+</section>
+<section>
+  <h2>Cost centres (expenses by department)</h2>
+  {departments_html}
+</section>
+<section>
+  <h2>Journal audit analytics</h2>
+  {audit_html}
 </section>
 </main>
 <footer>Generated by accviz · synthetic sample data unless stated otherwise</footer>

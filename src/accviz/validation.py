@@ -61,19 +61,30 @@ def _examples(values: list[str]) -> str:
 
 
 def validate_required_columns(raw: Mapping[str, pd.DataFrame]) -> ValidationResult:
-    """Check that every input table is present and has its required columns."""
+    """Check that every required table is present and has its required columns."""
     result = ValidationResult()
     for key, filename in config.DATASET_FILES.items():
         if key not in raw:
             result.error(f"{filename}: file is missing")
             continue
-        missing = [c for c in config.REQUIRED_COLUMNS[key] if c not in raw[key].columns]
-        if missing:
-            result.error(f"{filename}: missing required column(s): {', '.join(missing)}")
-        for col in config.OPTIONAL_COLUMNS.get(key, ()):
-            if col not in raw[key].columns:
-                result.warn(f"{filename}: optional column '{col}' not found; defaults applied")
+        _check_columns(key, filename, raw[key], result)
+    for key, filename in config.OPTIONAL_FILES.items():
+        if key not in raw:
+            result.warn(f"{filename}: file not found; payables analysis is empty")
+            continue
+        _check_columns(key, filename, raw[key], result)
+        if raw[key].empty:
+            result.warn(f"{filename}: file has no rows; payables analysis is empty")
     return result
+
+
+def _check_columns(key: str, filename: str, table: pd.DataFrame, result: ValidationResult) -> None:
+    missing = [c for c in config.REQUIRED_COLUMNS[key] if c not in table.columns]
+    if missing:
+        result.error(f"{filename}: missing required column(s): {', '.join(missing)}")
+    for col in config.OPTIONAL_COLUMNS.get(key, ()):
+        if col not in table.columns:
+            result.warn(f"{filename}: optional column '{col}' not found; defaults applied")
 
 
 def validate_dataset(ds: "Dataset") -> ValidationResult:
@@ -83,6 +94,8 @@ def validate_dataset(ds: "Dataset") -> ValidationResult:
     _validate_journal(ds.journal, ds.chart_of_accounts, result)
     _validate_invoices(ds.invoices, result)
     _validate_budget(ds.budget, ds.chart_of_accounts, result)
+    if not ds.supplier_invoices.empty:  # a missing optional file is already reported as a warning
+        _validate_invoices(ds.supplier_invoices, result, filename=config.SUPPLIER_INVOICES_FILE)
     return result
 
 
@@ -167,38 +180,51 @@ def _validate_journal(journal: pd.DataFrame, coa: pd.DataFrame, res: ValidationR
     if multi_date:
         res.warn(f"journal_entries.csv: entries with lines on different dates: {_examples(multi_date)}")
 
+    bad_source = journal.loc[~journal["source"].isin(config.JOURNAL_SOURCES), "entry_id"]
+    if not bad_source.empty:
+        res.error(
+            "journal_entries.csv: source must be 'system' or 'manual' "
+            f"(entry {bad_source.iloc[0]})"
+        )
+
     missing_dept = int((journal["department"] == "").sum())
     if missing_dept:
         res.warn(f"journal_entries.csv: {missing_dept} line(s) without department")
 
 
-def _validate_invoices(invoices: pd.DataFrame, res: ValidationResult) -> None:
+def _validate_invoices(
+    invoices: pd.DataFrame,
+    res: ValidationResult,
+    filename: str = "invoices.csv",
+    empty_hint: str = "no invoices; receivables aging will be empty",
+) -> None:
+    """Rules shared by customer invoices and supplier invoices (both are open items)."""
     if invoices.empty:
-        res.warn("invoices.csv: no invoices; receivables aging will be empty")
+        res.warn(f"{filename}: {empty_hint}")
         return
     dupes = sorted(invoices.loc[invoices["invoice_id"].duplicated(keep=False), "invoice_id"].unique())
     if dupes:
-        res.error(f"invoices.csv: duplicate invoice_id(s): {_examples(dupes)}")
+        res.error(f"{filename}: duplicate invoice_id(s): {_examples(dupes)}")
     if invoices["issue_date"].isna().any():
-        res.error("invoices.csv: invalid or missing issue_date")
+        res.error(f"{filename}: invalid or missing issue_date")
     if invoices["due_date"].isna().any():
-        res.error("invoices.csv: invalid or missing due_date")
+        res.error(f"{filename}: invalid or missing due_date")
     if invoices["amount"].isna().any() or (invoices["amount"] <= 0).any():
-        res.error("invoices.csv: amount must be a positive number")
+        res.error(f"{filename}: amount must be a positive number")
     if invoices["paid_amount"].isna().any():
-        res.error("invoices.csv: paid_amount must be numeric")
+        res.error(f"{filename}: paid_amount must be numeric")
     else:
         over = invoices.loc[invoices["paid_amount"] > invoices["amount"], "invoice_id"].tolist()
         if over:
-            res.error(f"invoices.csv: paid_amount exceeds amount for {_examples(over)}")
+            res.error(f"{filename}: paid_amount exceeds amount for {_examples(over)}")
         if (invoices["paid_amount"] < 0).any():
-            res.error("invoices.csv: paid_amount cannot be negative")
+            res.error(f"{filename}: paid_amount cannot be negative")
     late = invoices.loc[invoices["due_date"] < invoices["issue_date"], "invoice_id"].tolist()
     if late:
-        res.error(f"invoices.csv: due_date is before issue_date for {_examples(late)}")
+        res.error(f"{filename}: due_date is before issue_date for {_examples(late)}")
     no_date = invoices.loc[(invoices["paid_amount"] > 0) & invoices["paid_date"].isna(), "invoice_id"]
     if not no_date.empty:
-        res.warn(f"invoices.csv: paid amount without paid_date for {_examples(no_date.tolist())}")
+        res.warn(f"{filename}: paid amount without paid_date for {_examples(no_date.tolist())}")
 
 
 def _validate_budget(budget: pd.DataFrame, coa: pd.DataFrame, res: ValidationResult) -> None:

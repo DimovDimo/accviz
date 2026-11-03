@@ -237,3 +237,81 @@ def balance_sheet_composition(bs: BalanceSheet) -> go.Figure:
         legend={"orientation": "h", "y": -0.2},
     )
     return fig
+
+
+SECTION_COLORS = {"operating": BLUE, "investing": ORANGE, "financing": GREY}
+SEVERITY_COLORS = {"high": RED, "medium": ORANGE, "low": BLUE}
+
+
+def cash_flow_bars(monthly: pd.DataFrame) -> go.Figure:
+    """Operating, investing and financing cash flow per month, with the net change as a line."""
+    title = "Monthly cash flow by activity"
+    if monthly.empty:
+        return _empty_figure(title)
+    fig = go.Figure()
+    labels = {"operating": "Operating", "investing": "Investing", "financing": "Financing"}
+    for key in ("operating", "investing", "financing"):
+        fig.add_bar(x=monthly["period"], y=monthly[key], name=labels[key], marker_color=SECTION_COLORS[key])
+    fig.add_scatter(
+        x=monthly["period"],
+        y=monthly["net_change"],
+        name="Net change",
+        mode="lines+markers",
+        line={"color": GREEN, "width": 2},
+    )
+    fig.update_layout(
+        title=title,
+        template=TEMPLATE,
+        barmode="relative",
+        yaxis=_money_axis(),
+        legend={"orientation": "h", "y": -0.2},
+    )
+    return fig
+
+
+def forecast_chart(table: pd.DataFrame) -> go.Figure:
+    """Actual monthly revenue, the fitted trend and the forecast with its 95 % band."""
+    title = "Revenue: actual, forecast and 95 % band"
+    if table.empty:
+        return _empty_figure(title)
+    actual = table[table["kind"] == "actual"]
+    future = table[table["kind"] == "forecast"]
+    fig = go.Figure()
+    fig.add_scatter(x=actual["period"], y=actual["value"], name="Actual", mode="lines+markers", line={"color": BLUE})
+    if "fitted" in actual and actual["fitted"].notna().any():
+        fig.add_scatter(x=actual["period"], y=actual["fitted"], name="Fitted", mode="lines", line={"color": GREY, "dash": "dot"})
+    if not future.empty:
+        band_x = list(future["period"]) + list(future["period"][::-1])
+        band_y = list(future["upper"]) + list(future["lower"][::-1])
+        fig.add_scatter(x=band_x, y=band_y, fill="toself", fillcolor="rgba(239,108,0,0.15)", line={"width": 0},
+                        name="95 % band", hoverinfo="skip")  # fmt: skip
+        fig.add_scatter(x=future["period"], y=future["value"], name="Forecast", mode="lines+markers",
+                        line={"color": ORANGE, "dash": "dash"})  # fmt: skip
+    fig.update_layout(title=title, template=TEMPLATE, yaxis=_money_axis(), legend={"orientation": "h", "y": -0.2})
+    return fig
+
+
+def department_bars(pivot: pd.DataFrame) -> go.Figure:
+    """Expenses per month stacked by department (cost centre)."""
+    title = "Expenses by cost centre and month"
+    if pivot.empty:
+        return _empty_figure(title)
+    fig = go.Figure()
+    for i, column in enumerate(pivot.columns):
+        fig.add_bar(x=list(pivot.index), y=pivot[column], name=str(column), marker_color=PALETTE[i % len(PALETTE)])
+    fig.update_layout(title=title, template=TEMPLATE, barmode="stack", yaxis=_money_axis(),
+                      legend={"orientation": "h", "y": -0.2})  # fmt: skip
+    return fig
+
+
+def audit_bars(summary: pd.DataFrame) -> go.Figure:
+    """Number of lines flagged per audit rule, coloured by severity."""
+    title = "Audit findings by rule"
+    if summary.empty or summary["findings"].sum() == 0:
+        return _empty_figure(title)
+    colors = [SEVERITY_COLORS.get(sev, GREY) for sev in summary["severity"]]
+    fig = go.Figure()
+    fig.add_bar(x=summary["label"], y=summary["findings"], marker_color=colors,
+                text=summary["findings"], textposition="auto", name="Findings")  # fmt: skip
+    fig.update_layout(title=title, template=TEMPLATE, yaxis={"title": "Findings"})
+    return fig

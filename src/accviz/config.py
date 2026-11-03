@@ -7,6 +7,11 @@ from pathlib import Path
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_DIR: Path = PROJECT_ROOT / "data" / "sample"
 DEFAULT_REPORT_PATH: Path = PROJECT_ROOT / "reports" / "accounting_report.html"
+DEFAULT_WORKBOOK_PATH: Path = PROJECT_ROOT / "reports" / "accounting_workbook.xlsx"
+DEMO_DATA_DIR: Path = PROJECT_ROOT / "data" / "demo_anomalies"
+
+# Dashboard and CLI servers bind to localhost unless the user asks otherwise.
+DEFAULT_BIND_ADDRESS: str = "127.0.0.1"
 
 # Reporting currency (Bulgaria adopted the euro on 1 January 2026).
 CURRENCY: str = "EUR"
@@ -26,6 +31,19 @@ DATASET_FILES: dict[str, str] = {
     "invoices": INVOICES_FILE,
     "budget": BUDGET_FILE,
 }
+
+# Optional inputs (v1.1). A dataset without them still loads; the related analyses are empty.
+SUPPLIER_INVOICES_FILE = "supplier_invoices.csv"
+ANOMALY_GROUND_TRUTH_FILE = "anomaly_ground_truth.csv"
+OPTIONAL_FILES: dict[str, str] = {"supplier_invoices": SUPPLIER_INVOICES_FILE}
+# Written by the generator (demo datasets only); read by the audit evaluation.
+GROUND_TRUTH_KEY = "anomaly_ground_truth"
+
+# Descriptions containing this text (case-insensitive) mark opening-balance entries.
+OPENING_BALANCE_MARKER: str = "opening balance"
+
+# Values allowed in the optional journal ``source`` column; missing values mean "system".
+JOURNAL_SOURCES: tuple[str, ...] = ("system", "manual")
 
 # Account types and their natural (normal) balance side.
 ACCOUNT_TYPES: tuple[str, ...] = ("Asset", "Liability", "Equity", "Revenue", "Expense")
@@ -78,8 +96,10 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     "journal": ("entry_id", "date", "account_code", "debit", "credit"),
     "invoices": ("invoice_id", "customer", "issue_date", "due_date", "amount"),
     "budget": ("period", "account_code", "budget_amount"),
+    "supplier_invoices": ("invoice_id", "supplier", "issue_date", "due_date", "amount"),
 }
 OPTIONAL_COLUMNS: dict[str, tuple[str, ...]] = {
-    "journal": ("description", "department", "reference"),
+    "journal": ("description", "department", "reference", "source"),
     "invoices": ("paid_date", "paid_amount"),
+    "supplier_invoices": ("paid_date", "paid_amount"),
 }

@@ -2,7 +2,8 @@
 
 The module contains the rendering logic. :mod:`accviz.dashboard` is the thin script that
 Streamlit runs. The data directory defaults to the ``ACCVIZ_DATA_DIR`` environment
-variable, then to ``data/sample``. Users can also upload their own four CSV files.
+variable, then to ``data/sample``. Users can also upload their own CSV files; the four
+required files are mandatory and ``supplier_invoices.csv`` is optional.
 """
 
 from __future__ import annotations
@@ -12,13 +13,27 @@ import os
 import pandas as pd
 import streamlit as st
 
-from accviz import charts, config
+from accviz import audit as audit_mod
+from accviz import charts, config, departments, forecast, statements
 from accviz.analysis import AnalysisResult, analyze
+from accviz.export import workbook_bytes
 from accviz.loader import Dataset, load_raw_directory, prepare_dataset
 from accviz.report import RATIO_LABELS, format_value
 from accviz.validation import ValidationResult
 
 UPLOAD_KEYS = list(config.DATASET_FILES)
+OPTIONAL_UPLOAD_KEYS = list(config.OPTIONAL_FILES)
+TAB_NAMES = [
+    "Overview",
+    "Income statement",
+    "Cash flow",
+    "Balance sheet",
+    "Receivables & payables",
+    "Budget",
+    "Forecast",
+    "Audit",
+    "Data quality",
+]
 
 
 def _default_data_dir() -> str:
@@ -37,7 +52,7 @@ def load_from_directory(directory: str) -> tuple[Dataset | None, ValidationResul
 
 
 def load_from_uploads(files: dict[str, object]) -> tuple[Dataset | None, ValidationResult]:
-    raw = {key: pd.read_csv(f, dtype=str, keep_default_na=False) for key, f in files.items()}
+    raw = {key: pd.read_csv(f, dtype=str, keep_default_na=False) for key, f in files.items() if f is not None}
     return prepare_dataset(raw)
 
 
@@ -55,9 +70,11 @@ def sidebar_source() -> tuple[Dataset | None, ValidationResult]:
     uploads = {}
     for key, filename in config.DATASET_FILES.items():
         uploads[key] = st.sidebar.file_uploader(filename, type="csv", key=f"upload_{key}")
-    if all(uploads.values()):
+    for key, filename in config.OPTIONAL_FILES.items():
+        uploads[key] = st.sidebar.file_uploader(f"{filename} (optional)", type="csv", key=f"upload_{key}")
+    if all(uploads[key] for key in UPLOAD_KEYS):
         return load_from_uploads(uploads)
-    st.sidebar.info("Upload all four files to analyse your own data.")
+    st.sidebar.info("Upload the four required files to analyse your own data.")
     return None, ValidationResult()
 
 
@@ -107,11 +124,7 @@ def render_kpis(result: AnalysisResult) -> None:
         ("Gross profit", money(result.kpis["gross_profit"]), None),
         ("Total assets", money(result.kpis["total_assets"]), None),
         ("Current ratio", format_value("current_ratio", result.ratios["current_ratio"]), None),
-        (
-            "Revenue vs budget",
-            format_value("revenue_vs_budget_pct", result.kpis["revenue_vs_budget_pct"]),
-            None,
-        ),
+        ("Revenue vs budget", format_value("revenue_vs_budget_pct", result.kpis["revenue_vs_budget_pct"]), None),
     ]
     for col, (label, value, delta) in zip(cols2, values2):
         col.metric(label, value, delta)
@@ -122,6 +135,10 @@ def render_overview(result: AnalysisResult) -> None:
     left, right = st.columns([3, 2])
     left.plotly_chart(charts.revenue_expense_trend(result.income_monthly), width="stretch")
     right.plotly_chart(charts.expense_donut(result.expenses), width="stretch")
+    if result.cash_flow is not None:
+        cf = result.cash_flow
+        status = "reconciled to the GL" if cf.is_reconciled() else f"difference {cf.difference:,.2f}"
+        st.caption(f"Net cash flow {money(cf.net_change)} ({status}) · Audit findings: {result.audit.total_findings}")
 
 
 def render_income(result: AnalysisResult) -> None:
@@ -142,6 +159,42 @@ def render_income(result: AnalysisResult) -> None:
     left, right = st.columns(2)
     left.dataframe(result.revenues.round(2), hide_index=True, width="stretch")
     right.dataframe(result.expenses.round(2), hide_index=True, width="stretch")
+    st.subheader("Expenses by cost centre (department)")
+    if result.departments_monthly.empty:
+        st.info("No expenses in the selected period.")
+        return
+    pivot = departments.department_pivot(result.departments_monthly)
+    st.plotly_chart(charts.department_bars(pivot), width="stretch")
+    st.dataframe(result.departments_summary.round(4), hide_index=True, width="stretch")
+
+
+def render_cashflow(result: AnalysisResult) -> None:
+    cf = result.cash_flow
+    if cf is None:
+        st.info("No cash flow data.")
+        return
+    if cf.is_reconciled():
+        st.success(f"Cash flow reconciles to the general ledger: difference {cf.difference:,.2f} {config.CURRENCY}.")
+    else:
+        st.error(f"Cash flow does NOT reconcile: difference {cf.difference:,.2f} {config.CURRENCY}.")
+    cols = st.columns(4)
+    cols[0].metric("Opening cash", money(cf.opening_cash))
+    cols[1].metric("Operating", money(cf.operating))
+    cols[2].metric("Investing", money(cf.investing))
+    cols[3].metric("Financing", money(cf.financing))
+    cols2 = st.columns(2)
+    cols2[0].metric("Net change in cash", money(cf.net_change))
+    cols2[1].metric("Closing cash", money(cf.closing_cash))
+    st.plotly_chart(charts.cash_flow_bars(result.cash_flow_monthly), width="stretch")
+    st.subheader("Monthly statement (direct method)")
+    st.dataframe(result.cash_flow_monthly.round(2), hide_index=True, width="stretch")
+    st.subheader("Cash movements by account")
+    st.dataframe(cf.lines.round(2), hide_index=True, width="stretch")
+    st.caption(
+        "Operating: customer receipts, supplier and staff payments, tax and interest. "
+        "Investing: fixed assets. Financing: loan repayments and share capital. "
+        "Opening-balance entries form the opening cash and are not flows."
+    )
 
 
 def render_balance(result: AnalysisResult) -> None:
@@ -163,12 +216,39 @@ def render_balance(result: AnalysisResult) -> None:
 
 
 def render_receivables(result: AnalysisResult) -> None:
+    st.subheader("Receivables (customers)")
     left, right = st.columns([3, 2])
     left.plotly_chart(charts.aging_bars(result.aging_summary), width="stretch")
     right.subheader("Top customers")
     right.dataframe(result.top_customers.round(2), hide_index=True, width="stretch")
     st.subheader("Open invoices at period end")
     st.dataframe(result.aging.round(2), hide_index=True, width="stretch")
+
+
+def render_payables(result: AnalysisResult) -> None:
+    st.subheader("Payables (suppliers)")
+    if result.ap_aging.empty:
+        st.info("No open supplier invoices. Add supplier_invoices.csv to analyse payables.")
+    else:
+        left, right = st.columns([3, 2])
+        left.plotly_chart(charts.aging_bars(result.ap_summary), width="stretch")
+        right.subheader("Largest open balances")
+        right.dataframe(result.top_suppliers.round(2), hide_index=True, width="stretch")
+        st.subheader("Open supplier invoices at period end")
+        st.dataframe(result.ap_aging.round(2), hide_index=True, width="stretch")
+    st.subheader("Reconciliation to the general ledger")
+    table = result.reconciliation_table
+    if table.empty:
+        return
+    for _, row in table.iterrows():
+        if row["status"] == "reconciled":
+            st.success(f"{row['control']} (GL {row['account_code']}) reconciles to the sub-ledger.")
+        else:
+            st.error(
+                f"{row['control']} (GL {row['account_code']}) differs from the sub-ledger by "
+                f"{row['difference']:,.2f} {config.CURRENCY}. Check for postings that bypass the sub-ledger."
+            )
+    st.dataframe(table.round(2), hide_index=True, width="stretch")
 
 
 def render_budget(ds: Dataset, result: AnalysisResult) -> None:
@@ -183,6 +263,70 @@ def render_budget(ds: Dataset, result: AnalysisResult) -> None:
     st.dataframe(result.budget_monthly.round(2), hide_index=True, width="stretch")
 
 
+def render_forecast(ds: Dataset, result: AnalysisResult) -> None:
+    horizon = st.slider("Months to forecast", min_value=3, max_value=12, value=6, key="forecast_horizon")
+    history = forecast.revenue_series(statements.income_statement(ds.journal, ds.chart_of_accounts, None, result.end))
+    try:
+        model = forecast.fit_forecast(history, horizon)
+    except ValueError as exc:
+        st.info(f"Forecast not available: {exc}")
+        return
+    model_name = "trend × seasonal index" if model.seasonal else "linear trend (fewer than 24 months of history)"
+    cols = st.columns(3)
+    cols[0].metric("Model", "seasonal" if model.seasonal else "trend only", model_name)
+    cols[1].metric("Residual std. deviation", money(model.residual_sd))
+    mape = "–" if result.forecast_mape is None else f"{result.forecast_mape * 100:.1f} %"
+    cols[2].metric("Backtest MAPE (6-month holdout)", mape)
+    st.plotly_chart(charts.forecast_chart(model.table), width="stretch")
+    st.subheader("Forecast by month")
+    future = model.future.rename(columns={"value": "forecast", "lower": "lower 95 %", "upper": "upper 95 %"})
+    st.dataframe(future[["period", "forecast", "lower 95 %", "upper 95 %"]].round(2), hide_index=True, width="stretch")
+    st.caption(
+        "Forecast = trend × seasonal index (seasonal indices need at least 24 months). "
+        "The 95 % band is ±1.96 residual standard deviations. The backtest refits on all but the "
+        "last six months of history and reports the mean absolute percentage error."
+    )
+
+
+def render_audit(result: AnalysisResult) -> None:
+    audit = result.audit
+    if audit is None:
+        st.info("No audit results.")
+        return
+    st.caption(
+        f"Entries tested: {audit.entries_tested:,} · manual entries: {audit.manual_entries:,} "
+        f"({audit.manual_share:.1%}). Findings are indicators for review, not proof of error."
+    )
+    left, right = st.columns([3, 2])
+    left.plotly_chart(charts.audit_bars(audit.summary), width="stretch")
+    right.subheader("Rules")
+    right.dataframe(audit.summary[["label", "severity", "findings", "entries"]], hide_index=True, width="stretch")
+    b = audit.benford
+    st.subheader("Benford first-digit test")
+    text = (
+        f"{b.count:,} amounts tested (recurring fixed amounts excluded: {b.excluded_recurring}). "
+        f"Chi-square {b.chi_square:,.1f} against the critical value {b.critical_value} (8 df, 5 %): "
+        f"{'passes' if b.passed else 'does not pass'}. Mean absolute deviation {b.mad:.4f}: {b.conformity}."
+    )
+    st.write(text)
+    st.dataframe(b.digits.round(4), hide_index=True, width="stretch")
+    st.caption(
+        "Benford's law holds for amounts spread over several orders of magnitude. Narrow, "
+        "single-decade ledgers, such as the synthetic sample, often do not conform, so treat this as an indicator."
+    )
+    st.subheader("Findings")
+    if audit.findings.empty:
+        st.success("No findings in the selected period.")
+        return
+    options = ["All rules"] + [audit_mod.RULE_LABELS[r] for r in audit_mod.RULES]
+    choice = st.selectbox("Rule", options, key="audit_rule")
+    shown = audit.findings
+    if choice != "All rules":
+        rule = next(r for r in audit_mod.RULES if audit_mod.RULE_LABELS[r] == choice)
+        shown = shown[shown["rule"] == rule]
+    st.dataframe(shown.round(2), hide_index=True, width="stretch")
+
+
 def render_data_quality(ds: Dataset, result: AnalysisResult, validation: ValidationResult) -> None:
     st.subheader("Validation")
     st.write("No errors." if validation.ok else f"{len(validation.errors)} error(s).")
@@ -191,8 +335,14 @@ def render_data_quality(ds: Dataset, result: AnalysisResult, validation: Validat
     st.write(
         pd.DataFrame(
             {
-                "Table": ["Chart of accounts", "Journal lines", "Invoices", "Budget rows"],
-                "Rows": [len(ds.chart_of_accounts), len(ds.journal), len(ds.invoices), len(ds.budget)],
+                "Table": ["Chart of accounts", "Journal lines", "Customer invoices", "Supplier invoices", "Budget rows"],
+                "Rows": [
+                    len(ds.chart_of_accounts),
+                    len(ds.journal),
+                    len(ds.invoices),
+                    len(ds.supplier_invoices),
+                    len(ds.budget),
+                ],
             }
         )
     )
@@ -204,6 +354,8 @@ def render_data_quality(ds: Dataset, result: AnalysisResult, validation: Validat
     else:
         st.error(f"Trial balance is NOT balanced: debits {total_debit:,.2f} ≠ credits {total_credit:,.2f}.")
     st.dataframe(tb.round(2), hide_index=True, width="stretch")
+    st.subheader("Control account reconciliations")
+    st.dataframe(result.reconciliation_table.round(2), hide_index=True, width="stretch")
 
 
 def main() -> None:
@@ -221,18 +373,30 @@ def main() -> None:
         st.stop()
     result = analyze(ds, start, end)
     st.caption(f"Period: {result.period_label} · Currency: {config.CURRENCY}")
+    st.sidebar.download_button(
+        "Download Excel workbook (.xlsx)",
+        data=workbook_bytes(result),
+        file_name=f"accounting_{start:%Y%m%d}_{end:%Y%m%d}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
-    tabs = st.tabs(["Overview", "Income statement", "Balance sheet & cash", "Receivables", "Budget", "Data quality"])
+    tabs = st.tabs(TAB_NAMES)
     with tabs[0]:
         render_overview(result)
     with tabs[1]:
         render_income(result)
     with tabs[2]:
-        render_balance(result)
+        render_cashflow(result)
     with tabs[3]:
-        render_receivables(result)
+        render_balance(result)
     with tabs[4]:
-        render_budget(ds, result)
+        render_receivables(result)
+        render_payables(result)
     with tabs[5]:
+        render_budget(ds, result)
+    with tabs[6]:
+        render_forecast(ds, result)
+    with tabs[7]:
+        render_audit(result)
+    with tabs[8]:
         render_data_quality(ds, result, validation)
-

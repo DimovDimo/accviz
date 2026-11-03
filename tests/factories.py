@@ -20,7 +20,9 @@ import pandas as pd
 from accviz.loader import Dataset, prepare_dataset
 from accviz.synthetic import CSV_COLUMNS, DEFAULT_CHART_OF_ACCOUNTS
 
-JOURNAL_COLUMNS = CSV_COLUMNS["journal"]
+# The v1.0 journal layout (without the optional ``source`` column), so the tiny company
+# also exercises the backward-compatibility path: missing ``source`` means "system".
+JOURNAL_COLUMNS = [c for c in CSV_COLUMNS["journal"] if c != "source"]
 INVOICE_COLUMNS = CSV_COLUMNS["invoices"]
 BUDGET_COLUMNS = CSV_COLUMNS["budget"]
 

@@ -26,13 +26,16 @@ def run_app(monkeypatch, data_dir: Path) -> AppTest:
 def test_dashboard_renders_all_tabs_for_sample_data(monkeypatch):
     app = run_app(monkeypatch, config.DEFAULT_DATA_DIR)
     assert not app.exception, [e.value for e in app.exception]
-    assert len(app.tabs) == 6
+    assert len(app.tabs) == 9
     assert [t.label for t in app.tabs] == [
         "Overview",
         "Income statement",
-        "Balance sheet & cash",
-        "Receivables",
+        "Cash flow",
+        "Balance sheet",
+        "Receivables & payables",
         "Budget",
+        "Forecast",
+        "Audit",
         "Data quality",
     ]
 

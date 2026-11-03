@@ -45,7 +45,7 @@ def test_reversed_period_shows_an_error(app):
 def test_upload_mode_asks_for_all_files(app):
     app.sidebar.radio[0].set_value("Upload CSV files").run()
     assert not app.exception
-    assert any("Upload all four files" in i.value for i in app.sidebar.info)
+    assert any("Upload the four required files" in i.value for i in app.sidebar.info)
 
 
 def test_warnings_are_shown_in_an_expander(monkeypatch, tmp_path):
@@ -57,7 +57,7 @@ def test_warnings_are_shown_in_an_expander(monkeypatch, tmp_path):
     monkeypatch.setenv("ACCVIZ_DATA_DIR", str(folder))
     app = AppTest.from_file(str(APP), default_timeout=180).run()
     assert not app.exception
-    assert len(app.tabs) == 6  # data is still usable
+    assert len(app.tabs) == 9  # data is still usable
     assert any("optional column 'reference'" in w.value for w in app.warning)
 
 
@@ -124,4 +124,4 @@ def test_python_m_accviz_runs_the_cli(monkeypatch, capsys):
     with pytest.raises(SystemExit) as excinfo:
         runpy.run_module("accviz", run_name="__main__")
     assert excinfo.value.code == 0
-    assert "accviz 1.0.0" in capsys.readouterr().out
+    assert "accviz 1.1.0" in capsys.readouterr().out

@@ -1,0 +1,10 @@
+entry_id,anomaly_type,description
+JE-000472,round_amount,Marketing agency retainer
+JE-000696,duplicate_posting,Supplier invoice SUP-000033 - Alpine Components
+JE-000846,weekend_manual,Manual adjustment - office supplies
+JE-001089,threshold_manual,Manual payment - equipment service
+JE-001446,outlier_expense,Utility invoice (estimate)
+JE-001832,round_amount,Office equipment consumables
+JE-002112,duplicate_posting,Supplier invoice SUP-000084 - Balkan Wholesale
+JE-002338,weekend_manual,Manual adjustment - marketing materials
+JE-002547,threshold_manual,Manual payment - software licence

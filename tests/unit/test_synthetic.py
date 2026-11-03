@@ -15,10 +15,11 @@ def raw():
     return generate_dataset(GeneratorConfig(seed=11, months=3))
 
 
-def test_generates_all_four_tables_with_expected_columns(raw):
-    assert set(raw) == {"coa", "journal", "invoices", "budget"}
-    for key, columns in CSV_COLUMNS.items():
-        assert list(raw[key].columns) == columns, key
+def test_generates_all_tables_with_expected_columns(raw):
+    assert set(raw) == {"coa", "journal", "invoices", "budget", "supplier_invoices"}
+    for key in raw:
+        assert list(raw[key].columns) == CSV_COLUMNS[key], key
+    assert "source" in raw["journal"].columns
 
 
 def test_chart_of_accounts_is_complete_and_unique(raw):
@@ -105,9 +106,9 @@ def test_invalid_configuration_is_rejected(overrides):
         GeneratorConfig(**overrides)
 
 
-def test_write_dataset_creates_four_csv_files(tmp_path, raw):
+def test_write_dataset_creates_csv_files(tmp_path, raw):
     paths = write_dataset(raw, tmp_path / "out")
-    assert set(paths) == {"coa", "journal", "invoices", "budget"}
+    assert set(paths) == {"coa", "journal", "invoices", "budget", "supplier_invoices"}
     assert all(p.exists() and p.suffix == ".csv" for p in paths.values())
     reread = pd.read_csv(paths["budget"], dtype=str)
     assert len(reread) == len(raw["budget"])

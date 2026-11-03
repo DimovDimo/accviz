@@ -24,7 +24,7 @@ from tests.factories import tiny_raw
 def test_load_raw_directory_returns_all_tables_as_text(tmp_path, small_sample_raw):
     write_dataset(small_sample_raw, tmp_path)
     raw = load_raw_directory(tmp_path)
-    assert set(raw) == {"coa", "journal", "invoices", "budget"}
+    assert set(raw) == {"coa", "journal", "invoices", "budget", "supplier_invoices"}
     assert all(df.dtypes.eq(object).all() for df in raw.values())
     assert len(raw["journal"]) == len(small_sample_raw["journal"])
 
