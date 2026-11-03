@@ -9,6 +9,7 @@ required files are mandatory and ``supplier_invoices.csv`` is optional.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -17,7 +18,7 @@ from accviz import audit as audit_mod
 from accviz import charts, config, departments, forecast, statements
 from accviz.analysis import AnalysisResult, analyze
 from accviz.export import workbook_bytes
-from accviz.loader import Dataset, load_raw_directory, prepare_dataset
+from accviz.loader import Dataset, load_raw_directory, prepare_dataset, read_csv_table
 from accviz.report import RATIO_LABELS, format_value
 from accviz.validation import ValidationResult
 
@@ -40,8 +41,24 @@ def _default_data_dir() -> str:
     return os.environ.get("ACCVIZ_DATA_DIR", str(config.DEFAULT_DATA_DIR))
 
 
+def directory_signature(directory: str) -> tuple:
+    """File names, sizes and modification times, so that a changed file invalidates the cache."""
+    base = Path(directory)
+    names = list(config.DATASET_FILES.values()) + list(config.OPTIONAL_FILES.values())
+    signature = []
+    for name in names:
+        path = base / name
+        if path.is_file():
+            stat = path.stat()
+            signature.append((name, stat.st_size, stat.st_mtime_ns))
+        else:
+            signature.append((name, None, None))
+    return tuple(signature)
+
+
 @st.cache_data(show_spinner="Loading and validating data…")
-def load_from_directory(directory: str) -> tuple[Dataset | None, ValidationResult]:
+def _load_directory_cached(directory: str, signature: tuple) -> tuple[Dataset | None, ValidationResult]:
+    """``signature`` is only a cache key: a regenerated file must trigger a reload."""
     try:
         raw = load_raw_directory(directory)
     except FileNotFoundError as exc:
@@ -51,8 +68,23 @@ def load_from_directory(directory: str) -> tuple[Dataset | None, ValidationResul
     return prepare_dataset(raw)
 
 
+def load_from_directory(directory: str) -> tuple[Dataset | None, ValidationResult]:
+    return _load_directory_cached(directory, directory_signature(directory))
+
+
 def load_from_uploads(files: dict[str, object]) -> tuple[Dataset | None, ValidationResult]:
-    raw = {key: pd.read_csv(f, dtype=str, keep_default_na=False) for key, f in files.items() if f is not None}
+    raw: dict[str, pd.DataFrame] = {}
+    problems = ValidationResult()
+    for key, uploaded in files.items():
+        if uploaded is None:
+            continue
+        name = config.DATASET_FILES.get(key) or config.OPTIONAL_FILES.get(key, key)
+        try:
+            raw[key] = read_csv_table(uploaded)
+        except (pd.errors.EmptyDataError, pd.errors.ParserError, UnicodeDecodeError, ValueError) as exc:
+            problems.error(f"{name}: could not be read as a CSV file ({exc.__class__.__name__}: {exc})")
+    if problems.errors:
+        return None, problems
     return prepare_dataset(raw)
 
 

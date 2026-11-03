@@ -9,7 +9,7 @@ from typing import Mapping
 import pandas as pd
 
 from accviz import config
-from accviz.validation import ValidationResult, validate_dataset, validate_required_columns
+from accviz.validation import ValidationResult, validate_dataset, validate_raw_dates, validate_required_columns
 
 
 @dataclass(frozen=True)
@@ -135,7 +135,7 @@ def normalize_invoices(raw: pd.DataFrame) -> pd.DataFrame:
             "due_date": _date(raw["due_date"]),
             "amount": _amount(raw["amount"]),
             "paid_date": paid_date,
-            "paid_amount": paid_amount.fillna(0.0).astype(float),
+            "paid_amount": paid_amount.astype(float),  # NaN (invalid text) is reported by validation
         }
     )
 
@@ -151,7 +151,7 @@ def normalize_supplier_invoices(raw: pd.DataFrame) -> pd.DataFrame:
             "due_date": _date(raw["due_date"]),
             "amount": _amount(raw["amount"]),
             "paid_date": paid_date,
-            "paid_amount": paid_amount.fillna(0.0).astype(float),
+            "paid_amount": paid_amount.astype(float),  # NaN (invalid text) is reported by validation
         }
     )
 
@@ -167,6 +167,17 @@ def normalize_budget(raw: pd.DataFrame) -> pd.DataFrame:
 
 
 # ------------------------------------------------------------------------ public API
+def read_csv_table(source) -> pd.DataFrame:
+    """Read one CSV file (path or file-like object) as text, ignoring spaces around header names.
+
+    Spreadsheet exports often write ``a, b, c`` with a space after each comma; the spaces must
+    not make a required column look missing.
+    """
+    table = pd.read_csv(source, dtype=str, keep_default_na=False)
+    table.columns = [str(c).strip() for c in table.columns]
+    return table
+
+
 def load_raw_directory(directory: str | Path) -> dict[str, pd.DataFrame]:
     """Read the CSV files from *directory* as raw text tables.
 
@@ -178,11 +189,11 @@ def load_raw_directory(directory: str | Path) -> dict[str, pd.DataFrame]:
         path = base / filename
         if not path.is_file():
             raise FileNotFoundError(f"Required file not found: {path}")
-        raw[key] = pd.read_csv(path, dtype=str, keep_default_na=False)
+        raw[key] = read_csv_table(path)
     for key, filename in config.OPTIONAL_FILES.items():
         path = base / filename
         if path.is_file():
-            raw[key] = pd.read_csv(path, dtype=str, keep_default_na=False)
+            raw[key] = read_csv_table(path)
     return raw
 
 
@@ -209,6 +220,7 @@ def prepare_dataset(raw: Mapping[str, pd.DataFrame]) -> tuple[Dataset | None, Va
         supplier_invoices=supplier,
     )
     result = validate_dataset(ds)
+    result.errors = validate_raw_dates(raw).errors + result.errors
     result.warnings = pre.warnings + result.warnings
     return ds, result
 

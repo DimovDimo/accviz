@@ -30,7 +30,7 @@ def test_generate_anomalies_writes_ground_truth(anomaly_dir, capsys):
 def test_audit_prints_ground_truth_scores(anomaly_dir, capsys):
     assert main(["audit", "--data", str(anomaly_dir)]) == 0
     out = capsys.readouterr().out
-    assert "Ground truth: detected 100% of injected anomalies; false positives: 2" in out
+    assert "Ground truth: detected 100% of injected anomalies; entries flagged without an injected anomaly: 2" in out
     assert "duplicate_posting" in out and "round_amount" in out
     assert "Benford first digits" in out
 
@@ -134,3 +134,8 @@ def test_module_entry_point_runs_the_cli():
     )
     assert result.returncode == 0
     assert "accviz 1.1.0" in result.stdout
+
+
+def test_audit_with_reversed_period_exits_2(anomaly_dir, capsys):
+    assert main(["audit", "--data", str(anomaly_dir), "--start", "2025-06-01", "--end", "2025-01-01"]) == 2
+    assert "after end date" in capsys.readouterr().err

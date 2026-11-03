@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 
 MIN_HISTORY = 3
+BACKTEST_HOLDOUT = 6  # months withheld for the accuracy backtest
 SEASONAL_MIN_HISTORY = 24
 SEASONAL_PASSES = 10
 BAND_Z = 1.96
@@ -146,10 +147,12 @@ def fit_forecast(revenue: pd.Series, horizon: int = 6) -> Forecast:
     )
 
 
-def backtest(revenue: pd.Series, holdout: int = 6) -> dict:
+def backtest(revenue: pd.Series, holdout: int = BACKTEST_HOLDOUT) -> dict:
     """Fit on all but the last *holdout* months and score the held-out months.
 
-    Returns ``mape`` (fraction, e.g. 0.03 for 3 %), ``seasonal`` (whether the training
+    Returns ``mape`` (fraction, e.g. 0.03 for 3 %; ``None`` when every held-out month has zero
+    revenue; months with zero actual revenue are excluded from the average),
+    ``seasonal`` (whether the training
     window was long enough for seasonal indices), and the ``actual``/``predicted`` table.
     """
     if len(revenue) < holdout + MIN_HISTORY:
@@ -164,7 +167,9 @@ def backtest(revenue: pd.Series, holdout: int = 6) -> dict:
         np.array([index.get(m, 1.0) for m in test_months]) if seasonal else 1.0
     )
     actual = test.to_numpy(dtype=float)
-    mape = float(np.mean(np.abs(actual - predicted) / np.abs(actual)))
+    # MAPE is undefined for months with zero revenue; those months are left out of the average.
+    scored = np.abs(actual) > 0
+    mape = float(np.mean(np.abs(actual[scored] - predicted[scored]) / np.abs(actual[scored]))) if scored.any() else None
     return {
         "mape": mape,
         "seasonal": seasonal,
@@ -173,7 +178,14 @@ def backtest(revenue: pd.Series, holdout: int = 6) -> dict:
 
 
 def revenue_series(income_monthly: pd.DataFrame) -> pd.Series:
-    """Monthly revenue indexed by ``YYYY-MM`` (months without income rows are omitted)."""
+    """Monthly revenue on a continuous calendar, indexed by ``YYYY-MM``.
+
+    A month between the first and last posting with no income-statement activity is filled
+    with zero revenue. Gaps would otherwise shift the trend's time axis and misalign the
+    seasonal indices, because the model counts months, not table rows.
+    """
     if income_monthly.empty:
         return pd.Series(dtype=float)
-    return pd.Series(income_monthly["revenue"].to_numpy(dtype=float), index=income_monthly["period"].to_numpy())
+    values = pd.Series(income_monthly["revenue"].to_numpy(dtype=float), index=income_monthly["period"].to_numpy())
+    calendar = pd.period_range(values.index.min(), values.index.max(), freq="M").strftime("%Y-%m")
+    return values.reindex(calendar, fill_value=0.0).astype(float)

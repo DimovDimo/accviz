@@ -1,7 +1,7 @@
 # accviz: Visualization of Accounting Data
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-530%20collected-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-549%20collected-brightgreen.svg)](#testing)
 [![Coverage](https://img.shields.io/badge/coverage-%E2%89%A595%25%20gate-brightgreen.svg)](#testing)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b.svg)](https://streamlit.io/)
 [![Version](https://img.shields.io/badge/version-1.1.0-informational.svg)](CHANGELOG.md)
@@ -55,7 +55,7 @@ also plant known journal anomalies so the audit rules can be scored.
 | **KPIs & ratios** | Revenue, gross profit, net income, closing cash, receivables, total assets, revenue vs budget; gross/operating/net margin, current ratio, debt-to-equity. |
 | **Excel export (v1.1)** | 11-sheet, formatted `.xlsx` workbook (openpyxl), from the CLI or the dashboard sidebar. |
 | **Charts (Plotly)** | Revenue/expense/net-income trend, margins, income-statement waterfall, expense donut, cash flow bars, cash line, aging bars, forecast band, cost-centre bars, audit bars, budget variance, balance-sheet composition. Empty data shows a clear "no data" state. |
-| **Dashboard** | Streamlit app with a directory or CSV-upload data source, a date-range filter, nine tabs and an Excel download. |
+| **Dashboard** | Streamlit app with a directory or CSV-upload data source, a date-range filter, nine tabs and an Excel download. It reloads automatically when a data file changes. |
 | **HTML report** | One self-contained file (no external scripts; works offline) with KPIs, ratios, tables and all charts. |
 | **Synthetic data** | Reproducible (seeded) double-entry data for a fictional company over 24 months: seasonality, credit sales, late payers, supplier invoices with payment terms, bank loan, quarterly tax. An `--anomalies` option plants nine known journal anomalies. |
 
@@ -130,7 +130,7 @@ Entries tested: 2,856  (manual: 100, 3.5%)
 ...
 Benford first digits: 5,548 amounts, chi-square 182.2 (critical 15.507), MAD 0.0183: non-conformity
 ...
-Ground truth: detected 100% of injected anomalies; false positives: 2
+Ground truth: detected 100% of injected anomalies; entries flagged without an injected anomaly: 2
   round_amount          2 of 2
   weekend_manual        2 of 2
   threshold_manual      2 of 2
@@ -234,8 +234,9 @@ anomalies, used only to score the audit: `entry_id`, `anomaly_type`, `descriptio
 
 *Errors* stop the analysis; *warnings* are informational.
 
-* **Errors:** missing required files or columns · duplicate account codes or invoice IDs (sales or supplier) · invalid account types · unknown account codes · invalid dates or non-numeric amounts · negative amounts · lines with both or neither of debit/credit · **entries whose debits ≠ credits** · paid amount above invoice amount · due date before issue date · `source` not `system` or `manual` · budget period not `YYYY-MM` · budget on a balance-sheet account · duplicate budget rows.
-* **Warnings:** optional files or columns missing (for example `supplier_invoices.csv` or `source`) · optional file present but empty · subtype inconsistent with account type · missing department · entries spread over several dates · invoices with an amount paid but no payment date · empty invoice or budget tables.
+* **Errors:** missing required files or columns · a file saved with `;` as separator · duplicate account codes or invoice IDs (sales or supplier) · invalid account types · unknown account codes · invalid dates or non-numeric amounts · **a non-empty `paid_date` that is not `YYYY-MM-DD`** · **a non-numeric `paid_amount`** · negative amounts · lines with both or neither of debit/credit · **entries whose debits ≠ credits** · paid amount above invoice amount · due date before issue date · `source` not `system` or `manual` · budget period not `YYYY-MM` · budget on a balance-sheet account · duplicate budget rows.
+* **Parsing:** spaces around column names in the header row are ignored (`a, b, c` works); Windows (CRLF) and UTF-8 files with a byte-order mark are accepted.
+* **Warnings:** optional files or columns missing (for example `supplier_invoices.csv` or `source`) · optional file present but empty · subtype inconsistent with account type · missing department · entries spread over several dates (see the cash flow note below) · invoices with an amount paid but no valid payment date · empty invoice or budget tables.
 
 ---
 
@@ -253,7 +254,7 @@ anomalies, used only to score the audit: `entry_id`, `anomaly_type`, `descriptio
 | Debt-to-equity | Total liabilities ÷ total equity |
 | Aging (AR and AP) | Days overdue = report date − due date; a payment counts only if made on or before the report date |
 | Budget variance | Actual − budget. Favourable if revenue ≥ budget or expense ≤ budget. |
-| **Cash flow (direct method)** | Each cash line is classified by its *counterpart* account: fixed-asset accounts are **investing**; long-term liability and equity accounts are **financing**; everything else is **operating**. Each non-cash line contributes −(debit − credit) to the cash flow of its counterpart. |
+| **Cash flow (direct method)** | Each cash line is classified by its *counterpart* account: fixed-asset accounts are **investing**; long-term liability and equity accounts are **financing**; everything else is **operating**. Each non-cash line contributes −(debit − credit) to the cash flow of its counterpart. A flow is dated with its entry's cash line, so an entry dated across two months still reconciles in both months. |
 | Opening balance | Entries whose description contains "opening balance" (any case) are treated as opening cash, not as period flows. |
 | **Cash reconciliation** | Opening cash + operating + investing + financing must equal the GL cash balance at the period end. |
 | **Sub-ledger reconciliation** | GL 1100 (receivables) vs the open sales invoices; GL 2000 (payables) vs the open supplier invoices. A difference is reported and explained. |
@@ -307,14 +308,14 @@ Design choices:
 
 ## Revenue forecast
 
-* Linear trend fitted to monthly revenue by least squares.
+* Linear trend fitted to monthly revenue by least squares. Months between the first and last posting with no income-statement activity count as zero revenue, so the time axis stays on the calendar.
 * With **at least 24 months** of history, a multiplicative seasonal index for each calendar month
   is estimated. Trend and indices are refined alternately, so the seasonal pattern does not
   leak into the trend slope.
 * The 95 % band is the point forecast ± 1.96 × the residual standard deviation, with the lower
   bound floored at zero.
-* Accuracy is shown as the **holdout MAPE**: the last *k* months are withheld, the model is fitted
-  on the rest, and the forecast is compared with the actual values.
+* Accuracy is shown as the **holdout MAPE**: the last six months are withheld, the model is fitted
+  on the rest, and the forecast is compared with the actual values. Months with zero actual revenue are left out of the average, because the percentage error is undefined for them; if every held-out month is zero, no MAPE is shown.
 
 On the sample (24 months, seasonal model) the next six months are forecast as:
 
@@ -451,13 +452,27 @@ ruff check src tests                            # lint
 | **Property** | Accounting rules hold for random companies | Balanced entries, trial balance, accounting equation at every month end, cash flow reconciles at every month, sub-ledgers reconcile, anomaly recall |
 | **Performance** | Speed limits (NFR-02, NFR-11) | 24 months generated, analysed with audit and forecast, and exported within limits |
 
-Current result: **529 tests pass, 1 skipped by design** (a random company with under three months of
-revenue, where forecasting is not defined); **line coverage 96.8 %** against a 95 % gate.
+Current result: **548 tests pass, 1 skipped by design** (a random company with under three months of
+revenue, where forecasting is not defined); **line coverage 96.9 %** against a 95 % gate.
 
 Bugs found and fixed during the v1.1 testing round include: an empty-supplier-file state that
 hid its warning; the seasonal forecast leaking the seasonal pattern into the trend; the
 ground-truth score counting anomalies outside the audited period as misses; and a negative-zero
 percentage shown as "-0.0 %".
+
+A later review of the v1.1 code (see [`CHANGELOG.md`](CHANGELOG.md), *Unreleased*) found and fixed
+further defects, each now covered by a regression test:
+
+* invalid `paid_amount` or `paid_date` text was silently read as "unpaid" (now an error);
+* an entry dated across two months split its cash effect from the cash balance, so a correct ledger
+  reported a false cash-flow difference;
+* the dashboard kept showing old figures after the data files were regenerated (cache keyed on the path only);
+* an empty uploaded file crashed the page instead of showing an error;
+* the forecast backtest returned `inf` when a held-out month had zero revenue, and a month without
+  postings shifted the trend's time axis;
+* the audit counted false positives per finding rather than per entry, and `accviz audit` accepted a
+  reversed period silently;
+* spaces after commas in the header row made required columns look missing.
 
 ### Continuous integration
 
@@ -487,6 +502,8 @@ percentage shown as "-0.0 %".
 * Synthetic data ships with the repository. Real bank or ERP exports need a mapping to the CSV format above.
 * The dashboard is for a single user and has no authentication (see [Security defaults](#security-defaults)).
 * Budgets are monthly and at account level. The `department` column gives a cost-centre view of expenses only.
+* Dates must be `YYYY-MM-DD`; a date with a time part is rejected. Files must be comma-separated.
+* An entry dated across two months is accepted with a warning. Its cash effect is dated with its cash line, so the statements still reconcile.
 
 ## Contributing
 

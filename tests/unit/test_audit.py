@@ -308,3 +308,15 @@ def test_evaluate_against_truth_with_no_findings():
     assert result["table"].loc[0, "detected"] == 0
     assert result["false_positives"] == 0
     assert result["total"] == 0
+
+
+def test_false_positives_are_counted_per_entry_not_per_finding():
+    findings = pd.DataFrame({"rule": ["round_amount", "outlier_expense", "weekend_manual"], "entry_id": ["X1", "X1", "X2"]})
+    truth = pd.DataFrame({"entry_id": ["E1"], "anomaly_type": ["round_amount"], "description": ["a"]})
+    assert evaluate_against_truth(findings, truth)["false_positives"] == 2  # X1 and X2, each once
+
+
+def test_run_audit_rejects_a_reversed_period(coa):
+    journal = _journal([("A", "2025-01-06", "system", "x", [("1000", 10, 0), ("4000", 0, 10)])])
+    with pytest.raises(ValueError, match="after end date"):
+        run_audit(journal, coa, "2025-06-01", "2025-01-01")

@@ -3,6 +3,50 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses semantic versioning.
 
+## [1.1.1] 2026-11-03
+
+Fixes from a review of the v1.1.0 code. Each fix has a regression test.
+
+### Fixed
+- **Invalid payment values were treated as unpaid.** A non-numeric `paid_amount` was silently read as
+  `0`, and a non-empty `paid_date` that is not `YYYY-MM-DD` was silently read as blank. Both are now
+  validation errors (`invoices.csv` and `supplier_invoices.csv`). Blank values are still allowed.
+- **False cash-flow difference for entries dated across two months.** A flow is now dated with the
+  cash line of its entry, so the monthly and period statements reconcile to the GL. The ledger was
+  never wrong; only the statement's attribution was.
+- **Dashboard showed stale data after the files changed.** The data cache is now keyed on each file's
+  size and modification time as well as the directory path.
+- **Empty or unreadable uploads crashed the dashboard** with an uncaught `EmptyDataError`. They now
+  produce a validation error that names the file.
+- **Forecast backtest returned `inf`** when a held-out month had zero revenue. Zero-revenue months are
+  now left out of the MAPE, and the MAPE is `None` (shown as "-") when every held-out month is zero.
+- **Forecast trend could be misaligned by a missing month.** The trend and seasonal indices count
+  calendar months, so a month with no postings between the first and last posting is now zero revenue
+  rather than being dropped.
+- **Forecast error handling.** The backtest now runs only after a model has been fitted, so a failure
+  can no longer leave a model and an error message together. The current length guard already made
+  this path unreachable, so the change is defensive and has no effect on results.
+- **False positives were counted per finding.** An entry with two findings counted twice. The count
+  is now per entry, and the CLI text says "entries flagged without an injected anomaly".
+- **`accviz audit` accepted a reversed period** and printed an empty audit with exit code 0. It now
+  fails with exit code 2, as `summary` already does.
+- **Spaces after commas in the header row** (for example `account_code, account_name`) made required
+  columns look missing. Header names are now trimmed when reading CSV files.
+- **Unhelpful message for semicolon-separated files.** The error now says the file uses `;` and must be
+  comma-separated, instead of listing missing columns.
+
+### Changed
+- Validation is stricter for invalid `paid_amount` and `paid_date` values. A v1.1.0 dataset that contains
+  such values, which were previously accepted as unpaid, now fails validation. Fix the cells or leave
+  them blank.
+- The validation warning for a paid invoice without a payment date now reads "without a valid
+  paid_date".
+- `accviz audit` prints "entries flagged without an injected anomaly" in place of "false positives".
+
+### Tests
+- 19 regression tests were added (unit, integration and dashboard). The suite has 548 passing tests and
+  1 skipped by design, with 96.9 % line coverage.
+
 ## [1.1.0] 2026-11-03
 
 ### Added

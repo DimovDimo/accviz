@@ -78,9 +78,34 @@ def validate_required_columns(raw: Mapping[str, pd.DataFrame]) -> ValidationResu
     return result
 
 
+def validate_raw_dates(raw: Mapping[str, pd.DataFrame]) -> ValidationResult:
+    """Non-empty ``paid_date`` cells must be ``YYYY-MM-DD``; a blank cell means unpaid.
+
+    Normalisation turns unparsable dates into NaT, which looks the same as a blank cell, so
+    the check has to run on the raw text.
+    """
+    result = ValidationResult()
+    for key in ("invoices", "supplier_invoices"):
+        table = raw.get(key)
+        if table is None or "paid_date" not in table.columns:
+            continue
+        filename = config.DATASET_FILES.get(key) or config.OPTIONAL_FILES.get(key, key)
+        text = table["paid_date"].astype(str).str.strip()
+        parsed = pd.to_datetime(text.where(text != "", None), format="%Y-%m-%d", errors="coerce")
+        bad = text.index[(text != "") & parsed.isna()]
+        if len(bad):
+            ids = table.loc[bad, "invoice_id"].astype(str).tolist() if "invoice_id" in table.columns else [str(i) for i in bad]
+            result.error(
+                f"{filename}: invalid paid_date (expected YYYY-MM-DD, or blank if unpaid) for {_examples(ids)}"
+            )
+    return result
+
+
 def _check_columns(key: str, filename: str, table: pd.DataFrame, result: ValidationResult) -> None:
     missing = [c for c in config.REQUIRED_COLUMNS[key] if c not in table.columns]
-    if missing:
+    if missing and len(table.columns) == 1 and ";" in str(table.columns[0]):
+        result.error(f"{filename}: the file uses ';' as separator; save it as comma-separated CSV")
+    elif missing:
         result.error(f"{filename}: missing required column(s): {', '.join(missing)}")
     for col in config.OPTIONAL_COLUMNS.get(key, ()):
         if col not in table.columns:
@@ -212,7 +237,8 @@ def _validate_invoices(
     if invoices["amount"].isna().any() or (invoices["amount"] <= 0).any():
         res.error(f"{filename}: amount must be a positive number")
     if invoices["paid_amount"].isna().any():
-        res.error(f"{filename}: paid_amount must be numeric")
+        bad = invoices.loc[invoices["paid_amount"].isna(), "invoice_id"].tolist()
+        res.error(f"{filename}: paid_amount must be numeric, check {_examples(bad)}")
     else:
         over = invoices.loc[invoices["paid_amount"] > invoices["amount"], "invoice_id"].tolist()
         if over:
@@ -224,7 +250,7 @@ def _validate_invoices(
         res.error(f"{filename}: due_date is before issue_date for {_examples(late)}")
     no_date = invoices.loc[(invoices["paid_amount"] > 0) & invoices["paid_date"].isna(), "invoice_id"]
     if not no_date.empty:
-        res.warn(f"{filename}: paid amount without paid_date for {_examples(no_date.tolist())}")
+        res.warn(f"{filename}: paid amount without a valid paid_date for {_examples(no_date.tolist())}")
 
 
 def _validate_budget(budget: pd.DataFrame, coa: pd.DataFrame, res: ValidationResult) -> None:

@@ -100,3 +100,34 @@ def test_revenue_series_from_income_statement():
     series = revenue_series(income)
     assert series.to_dict() == {"2025-01": 500.0, "2025-02": 300.0}
     assert revenue_series(income.iloc[0:0]).empty
+
+
+def test_backtest_ignores_zero_revenue_months_instead_of_returning_infinity():
+    values = [100 + 10 * t for t in range(12)]
+    values[-2] = 0.0  # a held-out month with no revenue
+    result = backtest(_series(values), holdout=6)
+    assert result["mape"] is not None and np.isfinite(result["mape"])
+
+
+def test_backtest_is_none_when_every_held_out_month_is_zero():
+    values = [100 + 10 * t for t in range(9)] + [0.0, 0.0, 0.0]
+    assert backtest(_series(values), holdout=3)["mape"] is None
+
+
+def test_revenue_series_fills_months_without_postings_with_zero():
+    from accviz.forecast import revenue_series
+
+    income = pd.DataFrame({"period": ["2025-01", "2025-02", "2025-04"], "revenue": [100.0, 110.0, 130.0]})
+    series = revenue_series(income)
+    assert list(series.index) == ["2025-01", "2025-02", "2025-03", "2025-04"]
+    assert series["2025-03"] == 0.0
+
+
+def test_gap_in_history_keeps_the_calendar_time_axis():
+    from accviz.forecast import revenue_series
+
+    months = [m for m in pd.period_range("2025-01", periods=12, freq="M").strftime("%Y-%m") if m != "2025-05"]
+    income = pd.DataFrame({"period": months, "revenue": [100.0 + 10 * i for i in range(12) if i != 4]})
+    series = revenue_series(income)
+    assert len(series) == 12  # the missing month is present, as zero
+    assert series["2025-05"] == 0.0

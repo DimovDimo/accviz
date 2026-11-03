@@ -117,9 +117,10 @@ def analyze(dataset: Dataset, start=None, end=None, horizon: int = 6) -> Analysi
     fc_error: str | None = None
     try:
         fc_model = forecast.fit_forecast(revenue_hist, horizon)
-        fc_mape = forecast.backtest(revenue_hist)["mape"] if len(revenue_hist) >= 9 else None
     except ValueError as exc:
         fc_error = str(exc)
+    if fc_model is not None and len(revenue_hist) >= forecast.BACKTEST_HOLDOUT + forecast.MIN_HISTORY:
+        fc_mape = forecast.backtest(revenue_hist)["mape"]
 
     dept_monthly = departments.expenses_by_department(journal, coa, start_ts, end_ts)
     dept_sum = departments.department_summary(dept_monthly)

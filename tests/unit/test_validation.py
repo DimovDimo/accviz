@@ -199,7 +199,7 @@ def test_paid_amount_without_paid_date_is_a_warning():
     raw["invoices"].loc[1, "paid_amount"] = "100"
     result = run(raw)
     assert result.ok
-    assert has(result.warnings, "paid amount without paid_date")
+    assert has(result.warnings, "paid amount without a valid paid_date")
 
 
 def test_empty_invoices_is_a_warning():
@@ -284,3 +284,36 @@ def test_merge_combines_results(message_count):
     a.merge(b)
     assert a.warnings == ["w1"]
     assert len(a.errors) == message_count
+
+
+# ------------------------------------------------ regression: invalid paid values (review fix)
+def test_invalid_paid_amount_text_is_an_error_not_zero():
+    raw = tiny_raw()
+    raw["invoices"].loc[1, "paid_amount"] = "abc"
+    result = run(raw)
+    assert not result.ok
+    assert has(result.errors, "paid_amount must be numeric")
+
+
+def test_invalid_paid_date_text_is_an_error():
+    raw = tiny_raw()
+    raw["invoices"].loc[1, "paid_date"] = "31/01/2025"
+    raw["invoices"].loc[1, "paid_amount"] = "100"
+    result = run(raw)
+    assert not result.ok
+    assert has(result.errors, "invalid paid_date")
+
+
+def test_blank_paid_date_is_still_valid():
+    raw = tiny_raw()
+    raw["invoices"]["paid_date"] = ""
+    raw["invoices"]["paid_amount"] = "0"
+    assert run(raw).ok
+
+
+def test_semicolon_separated_file_gets_a_specific_message():
+    raw = tiny_raw()
+    raw["invoices"] = pd.DataFrame({"invoice_id;customer;issue_date;due_date;amount": ["INV-1;A;2025-01-01;2025-02-01;10"]})
+    result = run(raw)
+    assert not result.ok
+    assert has(result.errors, "uses ';' as separator")

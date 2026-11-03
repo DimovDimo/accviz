@@ -160,3 +160,24 @@ def test_statement_defaults_to_whole_journal(tiny_dataset):
     assert stmt.start == tiny_dataset.start_date
     assert stmt.end == tiny_dataset.end_date
     assert stmt.closing_cash == 1200
+
+
+def test_entry_dated_across_two_months_keeps_monthly_reconciliation(tiny_dataset):
+    # Rent is paid in cash on 1 March, but the expense line is dated 28 February (one entry).
+    # Each flow must follow the date of its entry's cash line, so no month shows a false gap.
+    from accviz.cashflow import monthly_cash_flow
+
+    ds = tiny_dataset
+    extra = pd.DataFrame(
+        [
+            dict(entry_id="MD-1", date=pd.Timestamp("2025-02-28"), account_code="6400", description="Rent",
+                 debit=300.0, credit=0.0, department="", reference="", source="system"),
+            dict(entry_id="MD-1", date=pd.Timestamp("2025-03-01"), account_code="1000", description="Rent",
+                 debit=0.0, credit=300.0, department="", reference="", source="system"),
+        ]
+    )
+    journal = pd.concat([ds.journal, extra], ignore_index=True)
+    monthly = monthly_cash_flow(journal, ds.chart_of_accounts)
+    assert monthly["difference"].abs().max() < 0.01
+    feb = cash_flow_statement(journal, ds.chart_of_accounts, "2025-02-01", "2025-02-28")
+    assert feb.is_reconciled()

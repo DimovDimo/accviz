@@ -183,7 +183,10 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         truth = _truth_in_period(truth, ds, result.start, result.end)
         ev = audit.evaluate_against_truth(result.findings, truth)
         print("-" * 78)
-        print(f"Ground truth: detected {ev['total']:.0%} of injected anomalies; false positives: {ev['false_positives']}")
+        print(
+            f"Ground truth: detected {ev['total']:.0%} of injected anomalies; "
+            f"entries flagged without an injected anomaly: {ev['false_positives']}"
+        )
         for _, row in ev["table"].iterrows():
             print(f"  {row['anomaly_type']:<20}{row['detected']:>3} of {row['injected']}")
     return 0

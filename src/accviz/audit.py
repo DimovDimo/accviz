@@ -316,6 +316,8 @@ def run_audit(journal: pd.DataFrame, coa: pd.DataFrame, start: DateLike = None, 
     """Run every rule and the Benford test for [start, end]."""
     start_ts = to_timestamp(start) if start is not None else journal["date"].min()
     end_ts = to_timestamp(end) if end is not None else journal["date"].max()
+    if start_ts > end_ts:
+        raise ValueError(f"start date {start_ts:%Y-%m-%d} is after end date {end_ts:%Y-%m-%d}")
     lines = _tested_lines(journal, coa)
     period = filter_dates(lines, start_ts, end_ts)
     findings = audit_findings(journal, coa, start_ts, end_ts)
@@ -337,8 +339,9 @@ def evaluate_against_truth(findings: pd.DataFrame, truth: pd.DataFrame) -> dict:
     """Score the findings against injected anomalies.
 
     Returns a dict with ``table`` (per anomaly type: injected, detected, detection rate),
-    ``false_positives`` (findings on entries that are not in the ground truth) and
-    ``total`` (overall detection rate).
+    ``false_positives`` (number of distinct entries that carry a finding but are not in the
+    ground truth; an entry with several findings counts once) and ``total`` (overall
+    detection rate).
     """
     rows = []
     for anomaly_type in RULES:
@@ -355,7 +358,11 @@ def evaluate_against_truth(findings: pd.DataFrame, truth: pd.DataFrame) -> dict:
         )
     table = pd.DataFrame(rows, columns=["anomaly_type", "injected", "detected", "detection_rate"])
     truth_ids = set(truth["entry_id"])
-    false_positives = int((~findings["entry_id"].isin(truth_ids)).sum()) if not findings.empty else 0
+    if findings.empty:
+        false_positives = 0
+    else:
+        flagged = pd.Series(findings["entry_id"].unique())
+        false_positives = int((~flagged.isin(truth_ids)).sum())
     total_injected = int(table["injected"].sum())
     total_detected = int(table["detected"].sum())
     return {

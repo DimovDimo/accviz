@@ -92,6 +92,11 @@ def _cash_lines(journal: pd.DataFrame, coa: pd.DataFrame) -> pd.DataFrame:
     df = df[df["entry_id"].isin(cash_entries)].copy()
     df["is_opening"] = df["entry_id"].isin(opening_entries)
     df["is_cash"] = df["subtype"] == config.SUBTYPE_CASH
+    # A flow belongs to the date of its entry's cash line, so an entry dated across two months
+    # does not split its cash effect from the cash balance it moves.
+    entry_cash_date = df.loc[df["is_cash"]].groupby("entry_id")["date"].min()
+    df["flow_date"] = df["entry_id"].map(entry_cash_date)
+    df["flow_period"] = df["flow_date"].dt.strftime("%Y-%m")
     investing = df["subtype"] == config.SUBTYPE_FIXED_ASSET
     financing = (df["subtype"] == config.SUBTYPE_LONG_TERM_LIABILITY) | (df["account_type"] == "Equity")
     df["section"] = np.select([investing, financing], ["investing", "financing"], default="operating")
@@ -112,7 +117,7 @@ def cash_flow_statement(
     opening_cash = float(cash.loc[opening_mask, "amount"].sum())
     gl_closing = float(cash.loc[cash["is_opening"] | (cash["date"] <= end_ts), "amount"].sum())
 
-    flows = cl[~cl["is_cash"] & ~cl["is_opening"] & (cl["date"] >= start_ts) & (cl["date"] <= end_ts)]
+    flows = cl[~cl["is_cash"] & ~cl["is_opening"] & (cl["flow_date"] >= start_ts) & (cl["flow_date"] <= end_ts)]
     by_section = flows.groupby("section")["flow"].sum()
     sections = {key: float(by_section.get(key, 0.0)) for key in SECTIONS}
 
@@ -158,7 +163,7 @@ def monthly_cash_flow(
     opening_adj = cash[cash["is_opening"]].groupby("period")["amount"].sum().reindex(months, fill_value=0.0)
 
     flows = cl[~cl["is_cash"] & ~cl["is_opening"]]
-    section_month = flows.pivot_table(index="period", columns="section", values="flow", aggfunc="sum")
+    section_month = flows.pivot_table(index="flow_period", columns="section", values="flow", aggfunc="sum")
     section_month = section_month.reindex(index=months, columns=list(SECTIONS), fill_value=0.0).fillna(0.0)
 
     out = pd.DataFrame({"period": months})
