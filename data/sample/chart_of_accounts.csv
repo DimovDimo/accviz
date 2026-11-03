@@ -1,0 +1,20 @@
+account_code,account_name,account_type,subtype
+1000,Cash at Bank,Asset,Cash
+1100,Accounts Receivable,Asset,Receivables
+1500,Equipment,Asset,Fixed Asset
+1590,Accumulated Depreciation,Asset,Fixed Asset
+2000,Accounts Payable,Liability,Current Liability
+2100,Income Tax Payable,Liability,Current Liability
+2500,Bank Loan,Liability,Long-term Liability
+3000,Share Capital,Equity,Equity
+4000,Product Sales,Revenue,Operating Revenue
+4100,Service Revenue,Revenue,Operating Revenue
+5000,Cost of Goods Sold,Expense,Cost of Sales
+6000,Salaries and Wages,Expense,Operating Expense
+6100,Rent,Expense,Operating Expense
+6200,Utilities,Expense,Operating Expense
+6300,Marketing,Expense,Operating Expense
+6400,Office and Supplies,Expense,Operating Expense
+6500,Depreciation,Expense,Operating Expense
+7000,Interest Expense,Expense,Financial Expense
+8000,Income Tax Expense,Expense,Tax Expense

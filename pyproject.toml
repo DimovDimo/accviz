@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "accviz"
+version = "1.0.0"
+description = "Visualization of accounting data: ledgers, financial statements, receivables, budgets and KPIs."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "plotly>=5.18",
+    "streamlit>=1.36",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-cov>=5"]
+
+[project.scripts]
+accviz = "accviz.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "--strict-markers -ra"
+markers = [
+    "unit: fast, isolated tests of a single module",
+    "integration: tests that exercise several layers together",
+    "property: randomised / invariant tests over many generated datasets",
+    "performance: timing tests with generous limits",
+    "ui: Streamlit dashboard tests",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["accviz"]
+branch = true
+concurrency = ["thread"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
